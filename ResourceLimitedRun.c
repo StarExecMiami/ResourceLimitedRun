@@ -11,6 +11,7 @@
 //--------------------------------------------------------------------------------------------------
 #define MAX_ARGS 20
 #define MAX_STRING 1024
+#define MAX_PIDS 1000
 #define CGROUPS_DIR "/sys/fs/cgroup"
 
 typedef char String[MAX_STRING];
@@ -59,13 +60,13 @@ void StartChildProgram(OptionsType Options,char * CGroupProcsFile) {
     int ChildPID;
     FILE* FilePointer;
     String ShellCommand;
+    String ErrorMessage;
     char *MyArgV[MAX_ARGS];
     int MyArgC;
 
     ChildPID = getpid();
-    printf("IN CHILD with PID %d\n",ChildPID);
+    printf("In CHILD with PID %d\n",ChildPID);
     sprintf(ShellCommand,"cat > %s",CGroupProcsFile);
-//get PID of child to this file and add to cgroup.procs so it's 1st proc there
     if ((FilePointer = popen(ShellCommand,"w")) == NULL) {
         printf("ERROR: Could not open %s for writing\n",CGroupProcsFile);
         exit(EXIT_FAILURE);
@@ -78,10 +79,11 @@ void StartChildProgram(OptionsType Options,char * CGroupProcsFile) {
     while (MyArgV[MyArgC++] != NULL) {
         MyArgV[MyArgC] = strtok(NULL," ");
     }
+//DEBUG printf("About to exec %s %s\n",MyArgV[0],MyArgV[1]);
     execvp(MyArgV[0],MyArgV);
-    perror("ERROR: Could not exec %s\n",Options.programToExecute);
+    sprintf(ErrorMessage,"ERROR: Could not exec %s\n",Options.programToExecute);
+    perror(ErrorMessage);
     exit(EXIT_FAILURE);
-
 }
 //--------------------------------------------------------------------------------------------------
 //----Fill an array of 100 PIDS from .procs
@@ -97,12 +99,14 @@ int NumberOfProcesses(char * CGroupProcsFile,int * PIDsInCGroup) {
         exit(EXIT_FAILURE);
     }
     NumberOfProccessesInCGroup = 0;
-    while (fscanf(FilePointer, "%d", &PIDsInCGroup[NumberOfProccessesInCGroup]) != EOF) {
-//DEBUG printf("cgroup.procs contains: %d\n", PIDsInCGroup[NumberOfProccessesInCGroup]);
+    printf("RLR says: The PIDs are now:");
+    while (fscanf(FilePointer,"%d",&PIDsInCGroup[NumberOfProccessesInCGroup]) != EOF) {
+        printf(" %d", PIDsInCGroup[NumberOfProccessesInCGroup]);
         NumberOfProccessesInCGroup++;
     }
+    printf("\n");
     pclose(FilePointer);
-    return NumberOfProccessesInCGroup; 
+    return(NumberOfProccessesInCGroup); 
 }
 //--------------------------------------------------------------------------------------------------
 //----Get CPU usage from cpu.stat
@@ -138,15 +142,11 @@ void KillProcesses(int NumberOfProccesses,int * PIDs) {
 
     int PIDsindex;
 
-    for (PIDsindex = 0; PIDsindex < NumberOfProccessesInCGroup; PIDsindex++) {
-        printf("PARENT says: Killing process %d...\n",PIDsInCGroup[PIDsindex]);
-        if (kill(PIDsInCGroup[PIDsindex],SIGKILL) != 0) {
-            printf("ERROR: Could not kill PID %d\n",PIDsInCGroup[PIDsindex]);
+    for (PIDsindex = 0; PIDsindex < NumberOfProccesses; PIDsindex++) {
+        printf("RLR says: Killing process %d...\n",PIDs[PIDsindex]);
+        if (kill(PIDs[PIDsindex],SIGKILL) != 0) {
+            printf("ERROR: Could not kill PID %d\n",PIDs[PIDsindex]);
         }
-//----Reap zombies
-//        while ((ReapedPID = waitpid(-1,NULL,WNOHANG)) > 0) {
-//            printf("PARENT says: Reaped process %d\n",ReapedPID);
-//        }
     }
 }
 //--------------------------------------------------------------------------------------------------
@@ -156,6 +156,7 @@ int main(int argc, char* argv[]) {
     String CGroupProcsFile;
     String CPUStatFile;
     String ShellCommand;
+    int ChildPID;
     int ParentPID;
     int ReapedPID;
     int NumberOfProccessesInCGroup;
@@ -163,9 +164,8 @@ int main(int argc, char* argv[]) {
     OptionsType Options;
     double CPUSeconds;
 
-    printf("PROCESS THE OPTIONS\n");
     Options = ProcessOptions(argc,argv);
-    int PIDsInCGroup[100];
+    int PIDsInCGroup[MAX_PIDS];
 
     ParentPID = getpid();
     sprintf(CGroupDir,"%s/%d",CGROUPS_DIR,ParentPID);
@@ -173,10 +173,10 @@ int main(int argc, char* argv[]) {
     sprintf(CPUStatFile,"%s/%s",CGroupDir,"cpu.stat");
 
     sprintf(ShellCommand,"mkdir %s",CGroupDir);
-printf("About to do %s\n",ShellCommand);
+//DEBUG printf("About to do %s\n",ShellCommand);
     system(ShellCommand);
     sprintf(ShellCommand,"chown -R %d:%d %s",getuid(),getgid(),CGroupDir);
-printf("About to do %s\n",ShellCommand);
+//DEBUG printf("About to do %s\n",ShellCommand);
     system(ShellCommand);
 
     if ((ChildPID = fork()) == -1) {
@@ -187,39 +187,38 @@ printf("About to do %s\n",ShellCommand);
     if (ChildPID == 0) {
         StartChildProgram(Options,CGroupProcsFile);
     } else {
-        printf("IN PARENT with PID %d\n",ParentPID);
-        printf("Extra sleep 1s\n");
+        printf("In RLR with PID %d\n",ParentPID);
+        printf(
+"RLR says: Sleep 1s to allow child %d to create and add itself to a cgroup\n",ChildPID);
         sleep(1);
 //DEBUG printf("Initial ps in parent:\n");
 //DEBUG system("ps"); 
         
         NumberOfProccessesInCGroup = NumberOfProcesses(CGroupProcsFile,PIDsInCGroup);
         while (NumberOfProccessesInCGroup > 0) {
-            printf("PARENT says: The PIDs are now: ");
-            for (PIDsindex = 0; PIDsindex < NumberOfProccessesInCGroup; PIDsindex++) {
-                    printf("%d ",PIDsInCGroup[PIDsindex]);
-            }
-            printf("\n");
 //----Check CPU: if over limit, kill cgroup, else sleep
             CPUSeconds = CPUUsage(CPUStatFile);
             if (Options.CPULimit > 0 && CPUSeconds > Options.CPULimit) {
                 KillProcesses(NumberOfProccessesInCGroup,PIDsInCGroup);
-            } else {
-                sleep(1);
+            }
+            sleep(1);
+//----Reap zombies
+            while ((ReapedPID = waitpid(-1,NULL,WNOHANG)) > 0) {
+                printf("RLR says: Reaped process %d\n",ReapedPID);
             }
             NumberOfProccessesInCGroup = NumberOfProcesses(CGroupProcsFile,PIDsInCGroup);
-//DEBUG printf("PARENT says: Number of processes is: %d\n", NumberOfProccessesInCGroup);
+//DEBUG printf("RLR says: Number of processes is: %d\n", NumberOfProccessesInCGroup);
         }
         printf("No processes left\n");
 //----Reap zombies child (should not exist)
         while ((ReapedPID = waitpid(-1,NULL,WNOHANG)) > 0) {
-            printf("PARENT says: Should not have reaped process %d\n",ReapedPID);
+            printf("RLR says: Should not have reaped process %d\n",ReapedPID);
         }
 //DEBUG printf("ps after waitPID:\n");
 //DEBUG system("ps");
 
 //----Once cgroup.procs file is empty, print out the CPU usage
-        printf("PARENT says: Final CPU usage: %.2f\n",CPUUsage(CPUStatFile));
+        printf("RLR says: Final CPU usage: %.2f\n",CPUUsage(CPUStatFile));
     }
 
     sprintf(ShellCommand,"rmdir %s",CGroupDir);

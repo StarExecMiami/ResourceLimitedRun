@@ -5,54 +5,102 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <sys/wait.h>
 #include <stdio.h>
 #include <time.h>
 //--------------------------------------------------------------------------------------------------
+#define TRUE 1
+#define FALSE 0
 #define MAX_ARGS 20
 #define MAX_STRING 1024
-#define MAX_PIDS 1000
+#define MAX_PIDS 1024
 #define CGROUPS_DIR "/sys/fs/cgroup"
 
 typedef char String[MAX_STRING];
 
 typedef struct {
+    int Verbosity;
     int CPULimit;
     int WCLimit;
     int RAMLimit;
-    String programToExecute;
+    String ProgramToControl;
 } OptionsType;
+//--------------------------------------------------------------------------------------------------
+void MyPrintf(OptionsType Options,int RequiredVerbosity,char * Format,...) {
+
+    va_list ThingsToPrint;
+    int Result;
+
+    if (Options.Verbosity >= RequiredVerbosity) {
+        va_start(ThingsToPrint,Format);
+        Result = vprintf(Format,ThingsToPrint);
+        va_end(ThingsToPrint);
+    }
+}
+//--------------------------------------------------------------------------------------------------
+void MySnprintf(OptionsType Options,char * PrintIntoHere,int LengthOfHere,char * Format,...) {
+
+    va_list ThingsToPrint;
+    int Result;
+
+    va_start(ThingsToPrint,Format);
+    Result = vsnprintf(PrintIntoHere,LengthOfHere,Format,ThingsToPrint);
+    va_end(ThingsToPrint);
+}
+//--------------------------------------------------------------------------------------------------
+char * SignalName(int Signal) {
+
+    switch (Signal) {
+        case SIGINT:
+            return("SIGINT");
+            break;
+        case SIGXCPU:
+            return("SIGXCPU");
+            break;
+        case SIGKILL:
+            return("SIGKILL");
+            break;
+        default:
+            return("UNKNOWN");
+            break;
+    }
+}
 //--------------------------------------------------------------------------------------------------
 //----Process options and fills out the struct with user's command line arguemnts
 OptionsType ProcessOptions(int argc, char* argv[]) {
 
     int option;
-    OptionsType inputOptions;
+    OptionsType Options;
 
-    inputOptions.CPULimit = -1;
-    inputOptions.WCLimit = -1;
-    inputOptions.RAMLimit = -1;
-    strcpy(inputOptions.programToExecute,"");
+    Options.Verbosity = 2;
+    Options.CPULimit = -1;
+    Options.WCLimit = -1;
+    Options.RAMLimit = -1;
+    strcpy(Options.ProgramToControl,"");
 
-    while ((option = getopt(argc, argv, "C:W:M:P:")) != -1) {
+    while ((option = getopt(argc, argv, "v:C:W:M:P:")) != -1) {
         switch(option) {
+            case 'v':
+                Options.Verbosity = atoi(optarg);
+                break;
             case 'C':
-                inputOptions.CPULimit = atoi(optarg);
+                Options.CPULimit = atoi(optarg);
                 break;
             case 'W':
-                inputOptions.WCLimit = atoi(optarg);
+                Options.WCLimit = atoi(optarg);
                 break;
             case 'M':
-                inputOptions.RAMLimit= atoi(optarg);
+                Options.RAMLimit= atoi(optarg);
                 break;
             case 'P':
-                strcpy(inputOptions.programToExecute,optarg);
+                strcpy(Options.ProgramToControl,optarg);
                 break;
         }
     }
-printf("CPU limit %d, WC limit %d, RAM limit %d, Program %s\n",inputOptions.CPULimit,
-inputOptions.WCLimit,inputOptions.RAMLimit,inputOptions.programToExecute);
-    return inputOptions;
+    MyPrintf(Options,2,"CPU limit %d, WC limit %d, RAM limit %d, Program %s\n",Options.CPULimit,
+Options.WCLimit,Options.RAMLimit,Options.ProgramToControl);
+    return(Options);
 }
 //--------------------------------------------------------------------------------------------------
 void StartChildProgram(OptionsType Options,char * CGroupProcsFile) {
@@ -65,52 +113,72 @@ void StartChildProgram(OptionsType Options,char * CGroupProcsFile) {
     int MyArgC;
 
     ChildPID = getpid();
-    printf("In CHILD with PID %d\n",ChildPID);
-    sprintf(ShellCommand,"cat > %s",CGroupProcsFile);
+    MyPrintf(Options,3,"In CHILD with PID %d\n",ChildPID);
+    MySnprintf(Options,ShellCommand,MAX_STRING,"cat > %s",CGroupProcsFile);
     if ((FilePointer = popen(ShellCommand,"w")) == NULL) {
-        printf("ERROR: Could not open %s for writing\n",CGroupProcsFile);
+        MyPrintf(Options,0,"ERROR: Could not open %s for writing\n",CGroupProcsFile);
         exit(EXIT_FAILURE);
     }
     fprintf(FilePointer,"%d\n",ChildPID);
     fclose(FilePointer);
 
     MyArgC = 0;
-    MyArgV[MyArgC] = strtok(Options.programToExecute," ");
+    MyArgV[MyArgC] = strtok(Options.ProgramToControl," ");
     while (MyArgV[MyArgC++] != NULL) {
         MyArgV[MyArgC] = strtok(NULL," ");
     }
-//DEBUG printf("About to exec %s %s\n",MyArgV[0],MyArgV[1]);
     execvp(MyArgV[0],MyArgV);
-    sprintf(ErrorMessage,"ERROR: Could not exec %s\n",Options.programToExecute);
-    perror(ErrorMessage);
+    MyPrintf(Options,0,"ERROR: Could not exec %s\n",Options.ProgramToControl);
     exit(EXIT_FAILURE);
 }
 //--------------------------------------------------------------------------------------------------
-//----Fill an array of 100 PIDS from .procs
-int NumberOfProcesses(char * CGroupProcsFile,int * PIDsInCGroup) {
+//----Fill an array of PIDS from .procs
+int NumberOfProcesses(OptionsType Options,char * CGroupProcsFile,int * PIDsInCGroup) {
 
     String ShellCommand;
     FILE* FilePointer;
     int NumberOfProccessesInCGroup;
 
-    sprintf(ShellCommand,"cat %s",CGroupProcsFile);
+    MySnprintf(Options,ShellCommand,MAX_STRING,"cat %s",CGroupProcsFile);
     if ((FilePointer = popen(ShellCommand,"r")) == NULL) {
-        printf("ERROR: Could not open %s for reading\n",CGroupProcsFile);
+        MyPrintf(Options,0,"ERROR: Could not open %s for reading\n",CGroupProcsFile);
         exit(EXIT_FAILURE);
     }
     NumberOfProccessesInCGroup = 0;
-    printf("RLR says: The PIDs are now:");
-    while (fscanf(FilePointer,"%d",&PIDsInCGroup[NumberOfProccessesInCGroup]) != EOF) {
-        printf(" %d", PIDsInCGroup[NumberOfProccessesInCGroup]);
+    MyPrintf(Options,3,"RLR says: The PIDs are now:");
+    while (NumberOfProccessesInCGroup < MAX_PIDS &&
+fscanf(FilePointer,"%d",&PIDsInCGroup[NumberOfProccessesInCGroup]) != EOF) {
+        MyPrintf(Options,3," %d",PIDsInCGroup[NumberOfProccessesInCGroup]);
         NumberOfProccessesInCGroup++;
     }
-    printf("\n");
+    MyPrintf(Options,3,"\n");
     pclose(FilePointer);
+    if (NumberOfProccessesInCGroup == MAX_PIDS) {
+        MyPrintf(Options,0,"ERROR: Ran out of space for PIDs when counting NumberOfProcesses\n");
+    }
     return(NumberOfProccessesInCGroup); 
 }
 //--------------------------------------------------------------------------------------------------
+//----Get WC usage 
+double WCUsage(OptionsType Options) {
+
+    static double Start = 0;
+    double Now;
+    struct timespec TheTime;
+    double Seconds;
+
+    clock_gettime(CLOCK_MONOTONIC,&TheTime);
+    Now = TheTime.tv_sec + TheTime.tv_nsec/1000000000.0;
+    if (Start == 0) {
+        Start = Now;
+    }
+    Seconds = Now-Start;
+    MyPrintf(Options,3,"RLR says: WCUsage is %.2fs\n",Seconds);
+    return(Seconds);
+}
+//--------------------------------------------------------------------------------------------------
 //----Get CPU usage from cpu.stat
-double CPUUsage(char * CPUStatFile) {
+double CPUUsage(OptionsType Options,char * CPUStatFile) {
 
 /*usage_usec 63559383
 user_usec 63316412
@@ -126,106 +194,160 @@ burst_usec 0*/
     FILE* FilePointer;
     long MicroSeconds;
 
-    sprintf(ShellCommand,"cat %s",CPUStatFile);
+    MySnprintf(Options,ShellCommand,MAX_STRING,"cat %s",CPUStatFile);
     if ((FilePointer = popen(ShellCommand,"r")) == NULL) {
-        printf("ERROR: Could not open %s for reading\n",CPUStatFile);
+        MyPrintf(Options,0,"ERROR: Could not open %s for reading\n",CPUStatFile);
         exit(EXIT_FAILURE);
     }
     fscanf(FilePointer,"usage_usec %ld",&MicroSeconds);
     fclose(FilePointer);
-    printf("CPUUsage is: %.2f\n",MicroSeconds/1000000.0);
+    MyPrintf(Options,3,"RLR says: CPUUsage is %.2fs\n",MicroSeconds/1000000.0);
 
-    return MicroSeconds/1000000.0;
+    return(MicroSeconds/1000000.0);
 }
 //--------------------------------------------------------------------------------------------------
-void KillProcesses(int NumberOfProccesses,int * PIDs) {
+void KillProcesses(OptionsType Options,int NumberOfProccesses,int * PIDs,int WhichSignal) {
 
     int PIDsindex;
+    static int SignalsSent[4][MAX_PIDS]; //----0 for PID, 1 for SIGINT, 2 for SIGXCPU, 3 for SIGKILL
+    int SignalsSentRow;
+    int SentIndex;
+    int SendTheSignal;
+
+    if (WhichSignal == SIGINT) {
+        SignalsSentRow = 1;
+    } else if (WhichSignal == SIGXCPU) {
+        SignalsSentRow = 2;
+    } else {
+        SignalsSentRow = 3;
+    }
 
     for (PIDsindex = 0; PIDsindex < NumberOfProccesses; PIDsindex++) {
-        printf("RLR says: Killing process %d...\n",PIDs[PIDsindex]);
-        if (kill(PIDs[PIDsindex],SIGKILL) != 0) {
-            printf("ERROR: Could not kill PID %d\n",PIDs[PIDsindex]);
+//----See what we have sent before to this PID
+        SentIndex = 0;
+        while (SentIndex < MAX_PIDS && SignalsSent[0][SentIndex] > 0 &&
+SignalsSent[0][SentIndex] != PIDs[PIDsindex]) {
+        MyPrintf(Options,4,
+"For PID %d already sent SIGINT %d and SIGXCPU %d and SIGKILL %d\n",SignalsSent[0][SentIndex],
+SignalsSent[1][SentIndex],SignalsSent[2][SentIndex],SignalsSent[3][SentIndex]);
+            SentIndex++;
+        }
+        SendTheSignal = FALSE;
+        if (SignalsSent[0][SentIndex] == 0) {
+            SignalsSent[0][SentIndex] = PIDs[PIDsindex];
+            SendTheSignal = TRUE;
+        }
+//----If have not sent a gentle signal yet, do it
+        if (! SignalsSent[SignalsSentRow][SentIndex]) {
+            SignalsSent[SignalsSentRow][SentIndex] = TRUE;
+            SendTheSignal = TRUE;
+//----If have sent a gentle signal before, KILL!
+        } else if (! SignalsSent[3][SentIndex]) {
+            MyPrintf(Options,2,"RLR says: Upgrading signal from %s to %s\n",
+SignalName(WhichSignal),SignalName(SIGKILL));
+            WhichSignal = SIGKILL;
+            SignalsSent[3][SentIndex] = TRUE;
+            SendTheSignal = TRUE;
+        }
+        if (SendTheSignal) {
+            MyPrintf(Options,2,"RLR says: Killing PID %d with %s ...\n",PIDs[PIDsindex],
+SignalName(WhichSignal));
+            if (kill(PIDs[PIDsindex],WhichSignal) != 0) {
+                MyPrintf(Options,0,"ERROR: Could not kill PID %d with %s\n",PIDs[PIDsindex],
+SignalName(WhichSignal));
+            }
         }
     }
 }
 //--------------------------------------------------------------------------------------------------
+void MonitorDescendantProcesses(OptionsType Options,char * CGroupProcsFile,char * CPUStatFile) {
+
+    int NumberOfProccessesInCGroup;
+    int DoneSomeKilling;
+    int ReapedPID;
+    int PIDsInCGroup[MAX_PIDS];
+
+//DEBUG printf("Initial ps in parent:\n");
+//DEBUG system("ps"); 
+//----Start the clock
+    WCUsage(Options);
+//----Watch the processes
+    NumberOfProccessesInCGroup = NumberOfProcesses(Options,CGroupProcsFile,PIDsInCGroup);
+    while (NumberOfProccessesInCGroup > 0) {
+        MyPrintf(Options,2,"RLR says: Number of processes is: %d\n",NumberOfProccessesInCGroup);
+        DoneSomeKilling = FALSE;
+        if (Options.CPULimit > 0 && CPUUsage(Options,CPUStatFile) > Options.CPULimit) {
+            KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGINT);
+            DoneSomeKilling = TRUE;
+        }
+        if (Options.WCLimit > 0 && WCUsage(Options) > Options.WCLimit) {
+            KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGXCPU);
+            DoneSomeKilling = TRUE;
+        }
+//----Reap zombies
+        sleep(1);
+        if (DoneSomeKilling) {
+            while ((ReapedPID = waitpid(-1,NULL,WNOHANG)) > 0) {
+                MyPrintf(Options,2,"RLR says: Reaped killed or exited process %d\n",ReapedPID);
+            }
+        }
+        NumberOfProccessesInCGroup = NumberOfProcesses(Options,CGroupProcsFile,PIDsInCGroup);
+    }
+    MyPrintf(Options,2,"RLR says: No processes left\n");
+//----Reap zombies child (should not exist)
+    while ((ReapedPID = waitpid(-1,NULL,WNOHANG)) > 0) {
+        MyPrintf(Options,2,"RLR says: Reaped exited process %d\n",ReapedPID);
+    }
+//DEBUG printf("ps after waitPID:\n");
+//DEBUG system("ps");
+}
+//--------------------------------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
 
+    OptionsType Options;
     String CGroupDir;
     String CGroupProcsFile;
     String CPUStatFile;
     String ShellCommand;
-    int ChildPID;
     int ParentPID;
-    int ReapedPID;
-    int NumberOfProccessesInCGroup;
-    FILE* FilePointer;
-    OptionsType Options;
-    double CPUSeconds;
+    int ChildPID;
 
     Options = ProcessOptions(argc,argv);
-    int PIDsInCGroup[MAX_PIDS];
 
     ParentPID = getpid();
-    sprintf(CGroupDir,"%s/%d",CGROUPS_DIR,ParentPID);
-    sprintf(CGroupProcsFile,"%s/%s",CGroupDir,"cgroup.procs");
-    sprintf(CPUStatFile,"%s/%s",CGroupDir,"cpu.stat");
+    MySnprintf(Options,CGroupDir,MAX_STRING,"%s/%d",CGROUPS_DIR,ParentPID);
+    MySnprintf(Options,CGroupProcsFile,MAX_STRING,"%s/%s",CGroupDir,"cgroup.procs");
+    MySnprintf(Options,CPUStatFile,MAX_STRING,"%s/%s",CGroupDir,"cpu.stat");
 
-    sprintf(ShellCommand,"mkdir %s",CGroupDir);
-//DEBUG printf("About to do %s\n",ShellCommand);
+    MySnprintf(Options,ShellCommand,MAX_STRING,"mkdir %s",CGroupDir);
+    MyPrintf(Options,3,"RLR says: About to do %s\n",ShellCommand);
     system(ShellCommand);
-    sprintf(ShellCommand,"chown -R %d:%d %s",getuid(),getgid(),CGroupDir);
-//DEBUG printf("About to do %s\n",ShellCommand);
+    MySnprintf(Options,ShellCommand,MAX_STRING,"chown -R %d:%d %s",getuid(),getgid(),CGroupDir);
+    MyPrintf(Options,3,"RLR says: About to do %s\n",ShellCommand);
     system(ShellCommand);
 
     if ((ChildPID = fork()) == -1) {
-        perror("Could not fork");
+        MyPrintf(Options,0,"ERROR: Could not fork()");
         exit(EXIT_FAILURE);
     }
 
     if (ChildPID == 0) {
         StartChildProgram(Options,CGroupProcsFile);
     } else {
-        printf("In RLR with PID %d\n",ParentPID);
-        printf(
+        MyPrintf(Options,3,"In RLR with PID %d\n",ParentPID);
+        MyPrintf(Options,3,
 "RLR says: Sleep 1s to allow child %d to create and add itself to a cgroup\n",ChildPID);
-        sleep(1);
-//DEBUG printf("Initial ps in parent:\n");
-//DEBUG system("ps"); 
-        
-        NumberOfProccessesInCGroup = NumberOfProcesses(CGroupProcsFile,PIDsInCGroup);
-        while (NumberOfProccessesInCGroup > 0) {
-//----Check CPU: if over limit, kill cgroup, else sleep
-            CPUSeconds = CPUUsage(CPUStatFile);
-            if (Options.CPULimit > 0 && CPUSeconds > Options.CPULimit) {
-                KillProcesses(NumberOfProccessesInCGroup,PIDsInCGroup);
-            }
-            sleep(1);
-//----Reap zombies
-            while ((ReapedPID = waitpid(-1,NULL,WNOHANG)) > 0) {
-                printf("RLR says: Reaped process %d\n",ReapedPID);
-            }
-            NumberOfProccessesInCGroup = NumberOfProcesses(CGroupProcsFile,PIDsInCGroup);
-//DEBUG printf("RLR says: Number of processes is: %d\n", NumberOfProccessesInCGroup);
-        }
-        printf("No processes left\n");
-//----Reap zombies child (should not exist)
-        while ((ReapedPID = waitpid(-1,NULL,WNOHANG)) > 0) {
-            printf("RLR says: Should not have reaped process %d\n",ReapedPID);
-        }
-//DEBUG printf("ps after waitPID:\n");
-//DEBUG system("ps");
-
-//----Once cgroup.procs file is empty, print out the CPU usage
-        printf("RLR says: Final CPU usage: %.2f\n",CPUUsage(CPUStatFile));
+    sleep(1);
+        MonitorDescendantProcesses(Options,CGroupProcsFile,CPUStatFile);
+        MyPrintf(Options,1,"RLR says: Final CPU usage: %.2f\n",CPUUsage(Options,CPUStatFile));
+//----WC is 1s too high due to sleep in loop to allow processes to die
+        MyPrintf(Options,1,"RLR says: Final WC  usage: %.2f\n",WCUsage(Options) - 1.0);
     }
 
-    sprintf(ShellCommand,"rmdir %s",CGroupDir);
-printf("About to do %s\n",ShellCommand);
+    MySnprintf(Options,ShellCommand,MAX_STRING,"rmdir %s",CGroupDir);
+    MyPrintf(Options,3,"RLR says: About to do %s\n",ShellCommand);
     system(ShellCommand);
 
     return(EXIT_SUCCESS);
 }
 //--------------------------------------------------------------------------------------------------
-

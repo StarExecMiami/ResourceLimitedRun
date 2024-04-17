@@ -10,8 +10,9 @@
 #include <stdio.h>
 #include <time.h>
 //--------------------------------------------------------------------------------------------------
-#define VERBOSITY_ERROR 0
-#define VERBOSITY_NONE 1
+#define VERBOSITY_ERROR -1
+#define VERBOSITY_NONE 0
+#define VERBOSITY_STDOUT_ONLY 1
 #define VERBOSITY_RESOURCE_USAGE 2
 #define VERBOSITY_BIG_STEPS 3
 #define VERBOSITY_RLR_ACTIONS 4
@@ -38,6 +39,7 @@ typedef struct {
     int RAMLimit;
     BOOLEAN TimeStamps;
     String ProgramToControl;
+    FILE* ProgramOutputFile;
 } OptionsType;
 //--------------------------------------------------------------------------------------------------
 static BOOLEAN GlobalInterrupted;
@@ -45,42 +47,37 @@ static BOOLEAN GlobalInterrupted;
 void MyPrintf(OptionsType Options,int RequiredVerbosity,char * Format,...) {
 
     va_list ThingsToPrint;
-    int Result;
     String FinalFormat;
 
     if (Options.Verbosity >= RequiredVerbosity) {
         switch (RequiredVerbosity) {
             case VERBOSITY_ERROR:
-                strcpy(FinalFormat,"ERROR: ");
-                strcat(FinalFormat,Format);
+                snprintf(FinalFormat,MAX_STRING,"ERROR: %s",Format);
                 break;
             case VERBOSITY_RESOURCE_USAGE:
-                strcpy(FinalFormat,"%% ");
-                strcat(FinalFormat,Format);
+                snprintf(FinalFormat,MAX_STRING,"%%%% %s",Format);
                 break;
             case VERBOSITY_RLR_ACTIONS:
             case VERBOSITY_BIG_STEPS:
-                strcpy(FinalFormat,"RLR says: ");
-                strcat(FinalFormat,Format);
+                snprintf(FinalFormat,MAX_STRING,"RLR says: %s",Format);
                 break;
             default:
                 strcpy(FinalFormat,Format);
                 break;
         }
         va_start(ThingsToPrint,Format);
-        Result = vprintf(FinalFormat,ThingsToPrint);
+        vprintf(FinalFormat,ThingsToPrint);
         fflush(stdout);
         va_end(ThingsToPrint);
     }
 }
 //--------------------------------------------------------------------------------------------------
-void MySnprintf(OptionsType Options,char * PrintIntoHere,int LengthOfHere,char * Format,...) {
+void MySnprintf(char * PrintIntoHere,int LengthOfHere,char * Format,...) {
 
     va_list ThingsToPrint;
-    int Result;
 
     va_start(ThingsToPrint,Format);
-    Result = vsnprintf(PrintIntoHere,LengthOfHere,Format,ThingsToPrint);
+    vsnprintf(PrintIntoHere,LengthOfHere,Format,ThingsToPrint);
     va_end(ThingsToPrint);
 }
 //--------------------------------------------------------------------------------------------------
@@ -120,9 +117,16 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
     Options.RAMLimit = -1;
     Options.TimeStamps = FALSE;
     strcpy(Options.ProgramToControl,"");
+    Options.ProgramOutputFile = NULL;
 
-    while ((option = getopt(argc, argv, "tv:C:W:M:P:")) != -1) {
+    while ((option = getopt(argc, argv, "o:tv:C:W:M:P:")) != -1) {
         switch(option) {
+            case 'o':
+                if ((Options.ProgramOutputFile = fopen(optarg,"w")) == NULL) {
+                    MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",optarg);
+                    exit(EXIT_FAILURE);
+                }
+                break;
             case 't':
                 Options.TimeStamps = TRUE;
                 break;
@@ -153,18 +157,18 @@ Options.WCLimit,Options.RAMLimit,Options.ProgramToControl);
 int NumberOfProcesses(OptionsType Options,char * CGroupProcsFile,int * PIDsInCGroup) {
 
     String ShellCommand;
-    FILE* FilePointer;
+    FILE* ShellFile;
     int NumberOfProccessesInCGroup;
 
-    MySnprintf(Options,ShellCommand,MAX_STRING,"cat %s",CGroupProcsFile);
-    if ((FilePointer = popen(ShellCommand,"r")) == NULL) {
+    MySnprintf(ShellCommand,MAX_STRING,"cat %s",CGroupProcsFile);
+    if ((ShellFile = popen(ShellCommand,"r")) == NULL) {
         MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",CGroupProcsFile);
         exit(EXIT_FAILURE);
     }
     NumberOfProccessesInCGroup = 0;
     MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"The PIDs are now:");
     while (NumberOfProccessesInCGroup < MAX_PIDS &&
-fscanf(FilePointer,"%d",&PIDsInCGroup[NumberOfProccessesInCGroup]) != EOF) {
+fscanf(ShellFile,"%d",&PIDsInCGroup[NumberOfProccessesInCGroup]) != EOF) {
 //----Have to do by hand for pretty output
         if (Options.Verbosity >= VERBOSITY_RLR_ACTIONS) {
             printf(" %d",PIDsInCGroup[NumberOfProccessesInCGroup]);
@@ -174,7 +178,7 @@ fscanf(FilePointer,"%d",&PIDsInCGroup[NumberOfProccessesInCGroup]) != EOF) {
     if (Options.Verbosity >= VERBOSITY_RLR_ACTIONS) {
         printf("\n");
     }
-    pclose(FilePointer);
+    pclose(ShellFile);
     if (NumberOfProccessesInCGroup == MAX_PIDS) {
         MyPrintf(Options,VERBOSITY_ERROR,"Ran out of PID space when counting NumberOfProcesses\n");
     }
@@ -185,16 +189,16 @@ fscanf(FilePointer,"%d",&PIDsInCGroup[NumberOfProccessesInCGroup]) != EOF) {
 double RAMUsage(OptionsType Options,char * RAMStatFile) {
 
     String ShellCommand;
-    FILE* FilePointer;
+    FILE* ShellFile;
     long Bytes;
 
-    MySnprintf(Options,ShellCommand,MAX_STRING,"cat %s",RAMStatFile);
-    if ((FilePointer = popen(ShellCommand,"r")) == NULL) {
+    MySnprintf(ShellCommand,MAX_STRING,"cat %s",RAMStatFile);
+    if ((ShellFile = popen(ShellCommand,"r")) == NULL) {
         MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",RAMStatFile);
         exit(EXIT_FAILURE);
     }
-    fscanf(FilePointer,"%ld",&Bytes);
-    pclose(FilePointer);
+    fscanf(ShellFile,"%ld",&Bytes);
+    pclose(ShellFile);
     return(Bytes/1048576.0);
 }
 //--------------------------------------------------------------------------------------------------
@@ -231,17 +235,17 @@ nr_bursts 0
 burst_usec 0*/
 
     String ShellCommand;
-    FILE* FilePointer;
+    FILE* ShellFile;
     long MicroSeconds;
     static double StartMicroSeconds = -1.0;
 
-    MySnprintf(Options,ShellCommand,MAX_STRING,"cat %s",CPUStatFile);
-    if ((FilePointer = popen(ShellCommand,"r")) == NULL) {
+    MySnprintf(ShellCommand,MAX_STRING,"cat %s",CPUStatFile);
+    if ((ShellFile = popen(ShellCommand,"r")) == NULL) {
         MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",CPUStatFile);
         exit(EXIT_FAILURE);
     }
-    fscanf(FilePointer,"usage_usec %ld",&MicroSeconds);
-    pclose(FilePointer);
+    fscanf(ShellFile,"usage_usec %ld",&MicroSeconds);
+    pclose(ShellFile);
     if (StartMicroSeconds < 0.0) {
         StartMicroSeconds = MicroSeconds;
         MyPrintf(Options,VERBOSITY_ALL,"CPU offset is %.2fs\n",StartMicroSeconds/1000000.0);
@@ -322,20 +326,20 @@ PIDs[PIDsindex],SignalName(WhichSignal));
 void StartChildProgram(OptionsType Options,char * CGroupProcsFile,int PIDOfRLR) {
 
     int ChildPID;
-    FILE* FilePointer;
+    FILE* ShellFile;
     String ShellCommand;
     char *MyArgV[MAX_ARGS];
     int MyArgC;
 
     ChildPID = getpid();
     MyPrintf(Options,VERBOSITY_DEBUG,"In CHILD with PID %d\n",ChildPID);
-    MySnprintf(Options,ShellCommand,MAX_STRING,"cat > %s",CGroupProcsFile);
-    if ((FilePointer = popen(ShellCommand,"w")) == NULL) {
+    MySnprintf(ShellCommand,MAX_STRING,"cat > %s",CGroupProcsFile);
+    if ((ShellFile = popen(ShellCommand,"w")) == NULL) {
         MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for writing\n",CGroupProcsFile);
         exit(EXIT_FAILURE);
     }
-    fprintf(FilePointer,"%d\n",ChildPID);
-    pclose(FilePointer);
+    fprintf(ShellFile,"%d\n",ChildPID);
+    pclose(ShellFile);
 
     MyArgC = 0;
     MyArgV[MyArgC] = strtok(Options.ProgramToControl," ");
@@ -368,8 +372,9 @@ int PIDOfRLR) {
 
     int ChildPID;
     int Pipe[2];
-    FILE* FilePointer;
+    FILE* PipeReader;
     String ChildOutput;
+    String TimeStamp;
 
     if (pipe(Pipe) != 0) {
         MyPrintf(Options,VERBOSITY_ERROR,"Could not create pipe to catch child output");
@@ -396,22 +401,30 @@ int PIDOfRLR) {
         CPUUsage(Options,CPUStatFile);
         WCUsage(Options);
         close(Pipe[1]);
-        FilePointer = fdopen(Pipe[0],"r");
+        PipeReader = fdopen(Pipe[0],"r");
         MyPrintf(Options,VERBOSITY_DEBUG,"Start reading from child %d\n",ChildPID);
-        while (fgets(ChildOutput,MAX_STRING,FilePointer) != NULL) {
+        strcpy(TimeStamp,"");
+        while (fgets(ChildOutput,MAX_STRING,PipeReader) != NULL) {
             if (Options.TimeStamps) {
 //----Output WC/CPU
-                MyPrintf(Options,VERBOSITY_NONE,"%6.2f/%6.2f\t",WCUsage(Options),
+                MySnprintf(TimeStamp,MAX_STRING,"%6.2f/%6.2f\t",WCUsage(Options),
 CPUUsage(Options,CPUStatFile));
             }
-            MyPrintf(Options,VERBOSITY_NONE,"%s",ChildOutput);
+            MyPrintf(Options,VERBOSITY_STDOUT_ONLY,"%s%s",TimeStamp,ChildOutput);
+            if (Options.ProgramOutputFile != NULL) {
+                fprintf(Options.ProgramOutputFile,"%s%s",TimeStamp,ChildOutput);
+            }
         }
         MyPrintf(Options,VERBOSITY_DEBUG,"Finished reading from child %d\n",ChildPID);
-        fclose(FilePointer);
+        fclose(PipeReader);
         if (Options.TimeStamps) {
-            MyPrintf(Options,VERBOSITY_NONE,"%6.2f/%6.2f\tEOF\n",WCUsage(Options),
+            MySnprintf(TimeStamp,MAX_STRING,"%6.2f/%6.2f\t",WCUsage(Options),
 CPUUsage(Options,CPUStatFile));
+            MyPrintf(Options,VERBOSITY_STDOUT_ONLY,"%sEOF\n",TimeStamp);
             fflush(stdout);
+            if (Options.ProgramOutputFile != NULL) {
+                fprintf(Options.ProgramOutputFile,"%sEOF\n",TimeStamp);
+            }
         }
     }
     exit(EXIT_SUCCESS);
@@ -506,15 +519,15 @@ int main(int argc, char* argv[]) {
     Options = ProcessOptions(argc,argv);
 
     ParentPID = getpid();
-    MySnprintf(Options,CGroupDir,MAX_STRING,"%s/%d",CGROUPS_DIR,ParentPID);
-    MySnprintf(Options,CGroupProcsFile,MAX_STRING,"%s/%s",CGroupDir,"cgroup.procs");
-    MySnprintf(Options,CPUStatFile,MAX_STRING,"%s/%s",CGroupDir,"cpu.stat");
-    MySnprintf(Options,RAMStatFile,MAX_STRING,"%s/%s",CGroupDir,"memory.current");
+    MySnprintf(CGroupDir,MAX_STRING,"%s/%d",CGROUPS_DIR,ParentPID);
+    MySnprintf(CGroupProcsFile,MAX_STRING,"%s/%s",CGroupDir,"cgroup.procs");
+    MySnprintf(CPUStatFile,MAX_STRING,"%s/%s",CGroupDir,"cpu.stat");
+    MySnprintf(RAMStatFile,MAX_STRING,"%s/%s",CGroupDir,"memory.current");
 
-    MySnprintf(Options,ShellCommand,MAX_STRING,"mkdir %s",CGroupDir);
+    MySnprintf(ShellCommand,MAX_STRING,"mkdir %s",CGroupDir);
     MyPrintf(Options,VERBOSITY_BIG_STEPS,"About to do %s\n",ShellCommand);
     system(ShellCommand);
-    MySnprintf(Options,ShellCommand,MAX_STRING,"chown -R %d:%d %s",getuid(),getgid(),CGroupDir);
+    MySnprintf(ShellCommand,MAX_STRING,"chown -R %d:%d %s",getuid(),getgid(),CGroupDir);
     MyPrintf(Options,VERBOSITY_BIG_STEPS,"About to do %s\n",ShellCommand);
     system(ShellCommand);
 
@@ -551,7 +564,10 @@ int main(int argc, char* argv[]) {
         MonitorDescendantProcesses(Options,CGroupProcsFile,CPUStatFile,RAMStatFile);
     }
 
-    MySnprintf(Options,ShellCommand,MAX_STRING,"rmdir %s",CGroupDir);
+    if (Options.ProgramOutputFile != NULL) {
+        fclose(Options.ProgramOutputFile);
+    }
+    MySnprintf(ShellCommand,MAX_STRING,"rmdir %s",CGroupDir);
     MyPrintf(Options,VERBOSITY_BIG_STEPS,"About to do %s\n",ShellCommand);
     system(ShellCommand);
 

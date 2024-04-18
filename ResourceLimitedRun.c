@@ -385,10 +385,11 @@ printf("Core number %d is available\n",CoreNumber);
 //----Get the core siblings
             MySnprintf(FileName,MAX_STRING,
 "/sys/devices/system/cpu/cpu%d/topology/core_siblings_list",CoreNumber);
-            if ((CPUFile = fopen(FileName,"R")) == NULL) {
+            if ((CPUFile = fopen(FileName,"r")) == NULL) {
                 MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",FileName);
                 exit(EXIT_FAILURE);
             }
+            fclose(CPUFile);
         }
     }
 

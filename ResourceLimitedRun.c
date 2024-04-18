@@ -1,3 +1,6 @@
+#define _GNU_SOURCE
+
+#include <getopt.h>
 #include <string.h>
 #include <signal.h>
 #include <limits.h>
@@ -9,6 +12,7 @@
 #include <sys/wait.h>
 #include <stdio.h>
 #include <time.h>
+#include <sched.h>
 //--------------------------------------------------------------------------------------------------
 #define VERBOSITY_ERROR -1
 #define VERBOSITY_NONE 0
@@ -27,6 +31,7 @@
 #define MAX_ARGS 20
 #define MAX_STRING 1024
 #define MAX_PIDS 1024
+#define MAX_CORES 1024
 
 #define CGROUPS_DIR "/sys/fs/cgroup/tptp"
 
@@ -111,6 +116,18 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
     int option;
     OptionsType Options;
 
+    static struct option LongOptions[] = {
+        {"output",           required_argument, NULL, 'o'},
+        {"timestamp",        no_argument,       NULL, 't'},
+        {"verbosity",        required_argument, NULL, 'b'},
+        {"cpu-limit",        required_argument, NULL, 'C'},
+        {"wall-clock-limit", required_argument, NULL, 'W'},
+        {"mem-soft-limit",   required_argument, NULL, 'M'},
+        {NULL,0,NULL,0}
+    };
+    int OptionStartIndex = 0;
+
+//----Defaults
     Options.Verbosity = VERBOSITY_DEFAULT;
     Options.CPULimit = -1;
     Options.WCLimit = -1;
@@ -119,8 +136,11 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
     strcpy(Options.ProgramToControl,"");
     Options.ProgramOutputFile = NULL;
 
-    while ((option = getopt(argc, argv, "o:tv:C:W:M:P:")) != -1) {
+    while ((option = getopt_long(argc,argv,"o:tb:C:W:M:",LongOptions,&OptionStartIndex)) != -1) {
         switch(option) {
+//---Flag options
+            case 0:
+                break;
             case 'o':
                 if ((Options.ProgramOutputFile = fopen(optarg,"w")) == NULL) {
                     MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",optarg);
@@ -130,7 +150,7 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
             case 't':
                 Options.TimeStamps = TRUE;
                 break;
-            case 'v':
+            case 'b':
                 Options.Verbosity = atoi(optarg);
                 break;
             case 'C':
@@ -142,11 +162,22 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
             case 'M':
                 Options.RAMLimit= atoi(optarg);
                 break;
-            case 'P':
-                strcpy(Options.ProgramToControl,optarg);
+            case '?':
+//----getopt_long does help for me
+                break;
+            default:
+                MyPrintf(Options,VERBOSITY_ERROR,"Invalid option %c\n",option);
+                exit(EXIT_FAILURE);
                 break;
         }
     }
+//----The program to control must be next
+    if (optind >= argc) {
+        MyPrintf(Options,VERBOSITY_ERROR,"Invalid option %c\n",option);
+        exit(EXIT_FAILURE);
+    }
+    strcpy(Options.ProgramToControl,argv[optind++]);
+
     MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,
 "CPU limit %d, WC limit %d, RAM limit %d, Program %s\n",Options.CPULimit,
 Options.WCLimit,Options.RAMLimit,Options.ProgramToControl);
@@ -186,11 +217,12 @@ fscanf(ShellFile,"%d",&PIDsInCGroup[NumberOfProccessesInCGroup]) != EOF) {
 }
 //--------------------------------------------------------------------------------------------------
 //----Get memory usage in MiB
-double RAMUsage(OptionsType Options,char * RAMStatFile) {
+double RAMUsage(OptionsType Options,char * RAMStatFile,BOOLEAN ReportMax) {
 
     String ShellCommand;
     FILE* ShellFile;
     long Bytes;
+    static long MaxBytes = 0;
 
     MySnprintf(ShellCommand,MAX_STRING,"cat %s",RAMStatFile);
     if ((ShellFile = popen(ShellCommand,"r")) == NULL) {
@@ -199,7 +231,14 @@ double RAMUsage(OptionsType Options,char * RAMStatFile) {
     }
     fscanf(ShellFile,"%ld",&Bytes);
     pclose(ShellFile);
-    return(Bytes/1048576.0);
+    if (Bytes > MaxBytes) {
+        MaxBytes = Bytes;
+    }
+    if (ReportMax) {
+        return(MaxBytes/1048576.0);
+    } else {
+        return(Bytes/1048576.0);
+    }
 }
 //--------------------------------------------------------------------------------------------------
 //----Get WC usage 
@@ -322,6 +361,40 @@ PIDs[PIDsindex],SignalName(WhichSignal));
         }
     }
 }
+//--------------------------------------------------------------------------------------------------
+int GetCoreNumbers(OptionsType Options,int * CoreNumbers) {
+
+    int NumberOfCores;
+    cpu_set_t AffinityMask;
+    int CoreNumber;
+    String FileName;
+    FILE* CPUFile;
+    String CoreSiblings;
+
+    NumberOfCores = 0;
+    if (sched_getaffinity(0,sizeof(cpu_set_t),&AffinityMask) != 0) {
+        MyPrintf(Options,VERBOSITY_ERROR,"Could not get core numbers\n");
+        exit(EXIT_FAILURE);
+    }
+    NumberOfCores = CPU_COUNT(&AffinityMask);
+printf("There are %d cores\n",NumberOfCores);
+    for (CoreNumber= 0;CoreNumber < NumberOfCores;CoreNumber++) {
+//----If the core is in this process's set
+        if (CPU_ISSET(CoreNumber,&AffinityMask)) {
+printf("Core number %d is available\n",CoreNumber);
+//----Get the core siblings
+            MySnprintf(FileName,MAX_STRING,
+"/sys/devices/system/cpu/cpu%d/topology/core_siblings_list",CoreNumber);
+            if ((CPUFile = fopen(FileName,"R")) == NULL) {
+                MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",FileName);
+                exit(EXIT_FAILURE);
+            }
+        }
+    }
+
+    return(NumberOfCores);
+}
+//--------------------------------------------------------------------------------------------------
 //--------------------------------------------------------------------------------------------------
 void StartChildProgram(OptionsType Options,char * CGroupProcsFile,int PIDOfRLR) {
 
@@ -461,7 +534,7 @@ NumberOfProccessesInCGroup);
 //----Always get resource usages for reporting, even if not limiting
         CPUUsed = CPUUsage(Options,CPUStatFile);
         WCUsed = WCUsage(Options);
-        RAMUsed = RAMUsage(Options,RAMStatFile);
+        RAMUsed = RAMUsage(Options,RAMStatFile,FALSE);
         if (Options.CPULimit > 0 && CPUUsed > Options.CPULimit) {
             KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGXCPU);
             DoneSomeKilling = TRUE;
@@ -496,11 +569,12 @@ ReapedPID);
     while ((ReapedPID = waitpid(-1,NULL,WNOHANG)) > 0) {
         MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Reaped exited process %d\n",ReapedPID);
     }
-    MyPrintf(Options,VERBOSITY_BIG_STEPS,"Final CPU usage: %.2f\n",
+    MyPrintf(Options,VERBOSITY_BIG_STEPS,"Final CPU usage: %.2fs\n",
 CPUUsage(Options,CPUStatFile));
 //----WC might be 1s too high due to sleep in loop to allow processes to die
-    MyPrintf(Options,VERBOSITY_BIG_STEPS,"Final WC  usage: %.2f\n",WCUsage(Options) - WCLost);
-    MyPrintf(Options,VERBOSITY_BIG_STEPS,"Final RAM usage: %.2f\n",RAMUsage(Options,RAMStatFile));
+    MyPrintf(Options,VERBOSITY_BIG_STEPS,"Final WC  usage: %.2fs\n",WCUsage(Options) - WCLost);
+    MyPrintf(Options,VERBOSITY_BIG_STEPS,"Final RAM usage: %.2fMiB\n",RAMUsage(Options,RAMStatFile,
+TRUE));
 
 }
 //--------------------------------------------------------------------------------------------------
@@ -512,6 +586,8 @@ int main(int argc, char* argv[]) {
     String CPUStatFile;
     String RAMStatFile;
     String ShellCommand;
+    int NumberOfCores;
+    int CoreNumbers[MAX_CORES];
     int ParentPID;
     int ChildPID;
     struct sigaction SignalHandling;
@@ -545,6 +621,8 @@ int main(int argc, char* argv[]) {
         exit(EXIT_FAILURE);
     }
     
+    NumberOfCores = GetCoreNumbers(Options,CoreNumbers);
+
     if ((ChildPID = fork()) == -1) {
         MyPrintf(Options,VERBOSITY_ERROR,"Could not fork() for child processing");
         exit(EXIT_FAILURE);

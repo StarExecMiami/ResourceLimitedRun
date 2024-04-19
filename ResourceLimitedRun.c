@@ -46,6 +46,16 @@ typedef struct {
     String ProgramToControl;
     FILE* ProgramOutputFile;
 } OptionsType;
+
+#define CORE_NUMBERS_ROW 0
+#define THREAD_NUMBERS_ROW 1
+typedef struct {
+    int NumberOfCPUs;
+    int NumberOfCores;
+    int NumberOfThreads;
+    int CoreAndThreadNumbers[2][MAX_CORES];
+} CPUArchitectureType;
+
 //--------------------------------------------------------------------------------------------------
 static BOOLEAN GlobalInterrupted;
 //--------------------------------------------------------------------------------------------------
@@ -110,6 +120,53 @@ char * SignalName(int Signal) {
     }
 }
 //--------------------------------------------------------------------------------------------------
+CPUArchitectureType GetCPUArchitecture(OptionsType Options) {
+
+    CPUArchitectureType CPUArchitecture;
+    cpu_set_t AffinityMask;
+    int CoreNumber;
+    String FileName;
+    FILE* CPUFile;
+    String CoreSiblings;
+
+    CPUArchitecture.NumberOfCores = 0;
+    if (sched_getaffinity(0,sizeof(cpu_set_t),&AffinityMask) != 0) {
+        MyPrintf(Options,VERBOSITY_ERROR,"Could not get core numbers\n");
+        exit(EXIT_FAILURE);
+    }
+    CPUArchitecture.NumberOfCores = CPU_COUNT(&AffinityMask);
+printf("There are %d cores\n",CPUArchitecture.NumberOfCores);
+    for (CoreNumber= 0;CoreNumber < CPUArchitecture.NumberOfCores;CoreNumber++) {
+//----If the core is in this process's set
+        if (CPU_ISSET(CoreNumber,&AffinityMask)) {
+printf("Core number %d is available\n",CoreNumber);
+//----Get the core siblings
+            MySnprintf(FileName,MAX_STRING,
+"/sys/devices/system/cpu/cpu%d/topology/core_siblings_list",CoreNumber);
+            if ((CPUFile = fopen(FileName,"r")) == NULL) {
+                MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",FileName);
+                exit(EXIT_FAILURE);
+            }
+//----Get core siblings, 
+//----Foreach core sibling
+//----    Add to CPUArchitecture.CoreAndThreadNumbers[0]
+//----    UNSET from AffinityMask
+//----    Get thread siblings, add to CoreAndThreadNumbers[1]
+            fclose(CPUFile);
+        }
+    }
+
+    return(CPUArchitecture);
+}
+//--------------------------------------------------------------------------------------------------
+void GetAndReportCPUArchitecture(OptionsType Options) {
+
+    CPUArchitectureType CPUArchitecture;
+
+    CPUArchitecture = GetCPUArchitecture(Option);
+
+}
+//--------------------------------------------------------------------------------------------------
 //----Process options and fills out the struct with user's command line arguemnts
 OptionsType ProcessOptions(int argc, char* argv[]) {
 
@@ -117,12 +174,13 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
     OptionsType Options;
 
     static struct option LongOptions[] = {
-        {"output",           required_argument, NULL, 'o'},
-        {"timestamp",        no_argument,       NULL, 't'},
-        {"verbosity",        required_argument, NULL, 'b'},
-        {"cpu-limit",        required_argument, NULL, 'C'},
-        {"wall-clock-limit", required_argument, NULL, 'W'},
-        {"mem-soft-limit",   required_argument, NULL, 'M'},
+        {"output",                required_argument, NULL, 'o'},
+        {"timestamp",             no_argument,       NULL, 't'},
+        {"verbosity",             required_argument, NULL, 'b'},
+        {"cpu-limit",             required_argument, NULL, 'C'},
+        {"wall-clock-limit",      required_argument, NULL, 'W'},
+        {"mem-soft-limit",        required_argument, NULL, 'M'},
+        {"get-cpu-architecture",  no_argument,       NULL, 'a'},
         {NULL,0,NULL,0}
     };
     int OptionStartIndex = 0;
@@ -141,6 +199,10 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
 //---Flag options
             case 0:
                 break;
+            case 'a':
+                GetAndReportCPUArchitecture(Options);
+                exit(EXIT_SUCCESS);
+                break
             case 'o':
                 if ((Options.ProgramOutputFile = fopen(optarg,"w")) == NULL) {
                     MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",optarg);
@@ -362,40 +424,6 @@ PIDs[PIDsindex],SignalName(WhichSignal));
     }
 }
 //--------------------------------------------------------------------------------------------------
-int GetCoreNumbers(OptionsType Options,int * CoreNumbers) {
-
-    int NumberOfCores;
-    cpu_set_t AffinityMask;
-    int CoreNumber;
-    String FileName;
-    FILE* CPUFile;
-    String CoreSiblings;
-
-    NumberOfCores = 0;
-    if (sched_getaffinity(0,sizeof(cpu_set_t),&AffinityMask) != 0) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not get core numbers\n");
-        exit(EXIT_FAILURE);
-    }
-    NumberOfCores = CPU_COUNT(&AffinityMask);
-printf("There are %d cores\n",NumberOfCores);
-    for (CoreNumber= 0;CoreNumber < NumberOfCores;CoreNumber++) {
-//----If the core is in this process's set
-        if (CPU_ISSET(CoreNumber,&AffinityMask)) {
-printf("Core number %d is available\n",CoreNumber);
-//----Get the core siblings
-            MySnprintf(FileName,MAX_STRING,
-"/sys/devices/system/cpu/cpu%d/topology/core_siblings_list",CoreNumber);
-            if ((CPUFile = fopen(FileName,"r")) == NULL) {
-                MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",FileName);
-                exit(EXIT_FAILURE);
-            }
-            fclose(CPUFile);
-        }
-    }
-
-    return(NumberOfCores);
-}
-//--------------------------------------------------------------------------------------------------
 //--------------------------------------------------------------------------------------------------
 void StartChildProgram(OptionsType Options,char * CGroupProcsFile,int PIDOfRLR) {
 
@@ -587,7 +615,7 @@ int main(int argc, char* argv[]) {
     String CPUStatFile;
     String RAMStatFile;
     String ShellCommand;
-    int NumberOfCores;
+    CPUArchitectureType CPUArchitecture;
     int CoreNumbers[MAX_CORES];
     int ParentPID;
     int ChildPID;
@@ -622,7 +650,7 @@ int main(int argc, char* argv[]) {
         exit(EXIT_FAILURE);
     }
     
-    NumberOfCores = GetCoreNumbers(Options,CoreNumbers);
+    CPUArchitecture = GetCPUArchitecture(Options);
 
     if ((ChildPID = fork()) == -1) {
         MyPrintf(Options,VERBOSITY_ERROR,"Could not fork() for child processing");

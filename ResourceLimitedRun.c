@@ -28,10 +28,10 @@
 #define TRUE 1
 #define FALSE 0
 
-#define MAX_ARGS 20
+#define MAX_ARGS 256
 #define MAX_STRING 1024
 #define MAX_PIDS 1024
-#define MAX_CORES 1024
+#define MAX_CORES 256
 
 #define CGROUPS_DIR "/sys/fs/cgroup/tptp"
 
@@ -45,15 +45,16 @@ typedef struct {
     BOOLEAN TimeStamps;
     String ProgramToControl;
     FILE* ProgramOutputFile;
+    BOOLEAN UseHyperThreading;
+    BOOLEAN ReportCPUArchitecture;
 } OptionsType;
 
-#define CORE_NUMBERS_ROW 0
-#define THREAD_NUMBERS_ROW 1
+#define MAX_THREADS 2
 typedef struct {
     int NumberOfCPUs;
     int NumberOfCores;
     int NumberOfThreads;
-    int CoreAndThreadNumbers[2][MAX_CORES];
+    int CoreAndThreadNumbers[MAX_THREADS][MAX_CORES];
 } CPUArchitectureType;
 
 //--------------------------------------------------------------------------------------------------
@@ -120,53 +121,6 @@ char * SignalName(int Signal) {
     }
 }
 //--------------------------------------------------------------------------------------------------
-CPUArchitectureType GetCPUArchitecture(OptionsType Options) {
-
-    CPUArchitectureType CPUArchitecture;
-    cpu_set_t AffinityMask;
-    int CoreNumber;
-    String FileName;
-    FILE* CPUFile;
-    String CoreSiblings;
-
-    CPUArchitecture.NumberOfCores = 0;
-    if (sched_getaffinity(0,sizeof(cpu_set_t),&AffinityMask) != 0) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not get core numbers\n");
-        exit(EXIT_FAILURE);
-    }
-    CPUArchitecture.NumberOfCores = CPU_COUNT(&AffinityMask);
-printf("There are %d cores\n",CPUArchitecture.NumberOfCores);
-    for (CoreNumber= 0;CoreNumber < CPUArchitecture.NumberOfCores;CoreNumber++) {
-//----If the core is in this process's set
-        if (CPU_ISSET(CoreNumber,&AffinityMask)) {
-printf("Core number %d is available\n",CoreNumber);
-//----Get the core siblings
-            MySnprintf(FileName,MAX_STRING,
-"/sys/devices/system/cpu/cpu%d/topology/core_siblings_list",CoreNumber);
-            if ((CPUFile = fopen(FileName,"r")) == NULL) {
-                MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",FileName);
-                exit(EXIT_FAILURE);
-            }
-//----Get core siblings, 
-//----Foreach core sibling
-//----    Add to CPUArchitecture.CoreAndThreadNumbers[0]
-//----    UNSET from AffinityMask
-//----    Get thread siblings, add to CoreAndThreadNumbers[1]
-            fclose(CPUFile);
-        }
-    }
-
-    return(CPUArchitecture);
-}
-//--------------------------------------------------------------------------------------------------
-void GetAndReportCPUArchitecture(OptionsType Options) {
-
-    CPUArchitectureType CPUArchitecture;
-
-    CPUArchitecture = GetCPUArchitecture(Option);
-
-}
-//--------------------------------------------------------------------------------------------------
 //----Process options and fills out the struct with user's command line arguemnts
 OptionsType ProcessOptions(int argc, char* argv[]) {
 
@@ -174,13 +128,15 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
     OptionsType Options;
 
     static struct option LongOptions[] = {
-        {"output",                required_argument, NULL, 'o'},
-        {"timestamp",             no_argument,       NULL, 't'},
-        {"verbosity",             required_argument, NULL, 'b'},
-        {"cpu-limit",             required_argument, NULL, 'C'},
-        {"wall-clock-limit",      required_argument, NULL, 'W'},
-        {"mem-soft-limit",        required_argument, NULL, 'M'},
-        {"get-cpu-architecture",  no_argument,       NULL, 'a'},
+        {"output",                  required_argument, NULL, 'o'},
+        {"timestamp",               no_argument,       NULL, 't'},
+        {"verbosity",               required_argument, NULL, 'b'},
+        {"cpu-limit",               required_argument, NULL, 'C'},
+        {"wall-clock-limit",        required_argument, NULL, 'W'},
+        {"mem-soft-limit",          required_argument, NULL, 'M'},
+        {"use-hyperthreading",      no_argument,       NULL, 'y'},
+        {"report-cpu-architecture", no_argument,       NULL, 'a'},
+        {"help",                    no_argument,       NULL, 'h'},
         {NULL,0,NULL,0}
     };
     int OptionStartIndex = 0;
@@ -193,16 +149,21 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
     Options.TimeStamps = FALSE;
     strcpy(Options.ProgramToControl,"");
     Options.ProgramOutputFile = NULL;
+    Options.UseHyperThreading = FALSE;
+    Options.ReportCPUArchitecture = FALSE;
 
-    while ((option = getopt_long(argc,argv,"o:tb:C:W:M:",LongOptions,&OptionStartIndex)) != -1) {
+    while ((option = getopt_long(argc,argv,"yao:tb:C:W:M:?h",LongOptions,
+&OptionStartIndex)) != -1) {
         switch(option) {
 //---Flag options
             case 0:
                 break;
+            case 'y':
+                Options.UseHyperThreading = TRUE;
+                break;
             case 'a':
-                GetAndReportCPUArchitecture(Options);
-                exit(EXIT_SUCCESS);
-                break
+                Options.ReportCPUArchitecture = TRUE;
+                break;
             case 'o':
                 if ((Options.ProgramOutputFile = fopen(optarg,"w")) == NULL) {
                     MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",optarg);
@@ -225,7 +186,9 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
                 Options.RAMLimit= atoi(optarg);
                 break;
             case '?':
-//----getopt_long does help for me
+            case 'h':
+                MyPrintf(Options,VERBOSITY_NONE,"HELP\n");
+                exit(EXIT_SUCCESS);
                 break;
             default:
                 MyPrintf(Options,VERBOSITY_ERROR,"Invalid option %c\n",option);
@@ -234,16 +197,160 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
         }
     }
 //----The program to control must be next
-    if (optind >= argc) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Invalid option %c\n",option);
-        exit(EXIT_FAILURE);
-    }
-    strcpy(Options.ProgramToControl,argv[optind++]);
-
-    MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,
+    if (optind > argc) {
+        strcpy(Options.ProgramToControl,argv[optind++]);
+        MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,
 "CPU limit %d, WC limit %d, RAM limit %d, Program %s\n",Options.CPULimit,
 Options.WCLimit,Options.RAMLimit,Options.ProgramToControl);
+    } else {
+        if (!Options.ReportCPUArchitecture) {
+            MyPrintf(Options,VERBOSITY_ERROR,"No program to control\n",option);
+            exit(EXIT_FAILURE);
+        }
+    }
+
     return(Options);
+}
+//--------------------------------------------------------------------------------------------------
+void ReportCPUArchitecture(OptionsType Options,CPUArchitectureType CPUArchitecture) {
+
+    int CPUNumber,CoreSibling,ThreadNumber,CoreSiblingsPerCPU;
+
+    MyPrintf(Options,VERBOSITY_NONE,"Number of CPUs:     %2d\n",CPUArchitecture.NumberOfCPUs);
+    MyPrintf(Options,VERBOSITY_NONE,"Number of cores:    %2d\n",CPUArchitecture.NumberOfCores);
+    MyPrintf(Options,VERBOSITY_NONE,"Number of threads:  %2d\n",CPUArchitecture.NumberOfThreads);
+
+    CoreSiblingsPerCPU = 
+CPUArchitecture.NumberOfCores/CPUArchitecture.NumberOfCPUs/CPUArchitecture.NumberOfThreads;
+    MyPrintf(Options,VERBOSITY_NONE,"Core configuration:\n");
+    for (CPUNumber = 0;CPUNumber < CPUArchitecture.NumberOfCPUs;CPUNumber++) {
+        MyPrintf(Options,VERBOSITY_NONE,"    CPU %2d: ",CPUNumber);
+        for (CoreSibling = CPUNumber*CoreSiblingsPerCPU;
+CoreSibling < (CPUNumber+1)*CoreSiblingsPerCPU;CoreSibling++) {
+            for (ThreadNumber = 0;ThreadNumber < CPUArchitecture.NumberOfThreads; ThreadNumber++) {
+                MyPrintf(Options,VERBOSITY_NONE,"%2d",
+CPUArchitecture.CoreAndThreadNumbers[ThreadNumber][CoreSibling]);
+                if (CoreSibling < (CPUNumber+1)*CoreSiblingsPerCPU - 1||
+ThreadNumber < CPUArchitecture.NumberOfThreads - 1) {
+                    MyPrintf(Options,VERBOSITY_NONE,",");
+                }
+            }
+            MyPrintf(Options,VERBOSITY_NONE," ");
+        }
+        MyPrintf(Options,VERBOSITY_NONE,"\n");
+    }
+}
+//--------------------------------------------------------------------------------------------------
+int GetSiblings(OptionsType Options,int CoreNumber,char * SiblingType,int * Siblings) {
+
+    String FileName;
+    FILE* CPUFile;
+    String SiblingsLine;
+    int NumberOfSiblings;
+    char * CSV;
+    char * Dash;
+    int Start,End,Number;
+
+    MySnprintf(FileName,MAX_STRING,"/sys/devices/system/cpu/cpu%d/topology/%s_siblings_list",
+CoreNumber,SiblingType);
+    if ((CPUFile = fopen(FileName,"r")) == NULL) {
+        MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",FileName);
+        exit(EXIT_FAILURE);
+    }
+    if (fgets(SiblingsLine,MAX_STRING,CPUFile) == NULL) {
+        MyPrintf(Options,VERBOSITY_ERROR,"Could not read line from %s\n",FileName);
+        exit(EXIT_FAILURE);
+    }
+    fclose(CPUFile);
+//DEBUG printf("for %s got line %s\n",SiblingType,SiblingsLine);
+    NumberOfSiblings = 0;
+    CSV = strtok(SiblingsLine,",");
+//DEBUG printf("first comma token is %s\n",CSV);
+    while (CSV != NULL) {
+//----If a range expand
+        if ((Dash = strchr(CSV,'-')) != NULL) {
+//DEBUG printf("dash range found\n");
+            End = atoi(Dash+1);
+            Dash = '\0';
+            Start = atoi(CSV);
+            for (Number = Start; Number <= End; Number++) {
+//DEBUG printf("adding %d\n",Number);
+                Siblings[NumberOfSiblings++] = Number;
+            }
+//----Otherwise take as is
+        } else {
+//DEBUG printf("adding plain value %d\n",atoi(CSV));
+            Siblings[NumberOfSiblings++] = atoi(CSV);
+        }
+        CSV = strtok(NULL," ");
+//DEBUG printf("next comma token is %s\n",CSV);
+    }
+
+    return(NumberOfSiblings);
+}
+//--------------------------------------------------------------------------------------------------
+CPUArchitectureType GetCPUArchitecture(OptionsType Options) {
+
+    CPUArchitectureType CPUArchitecture;
+    cpu_set_t AffinityMask;
+    int CoreNumber;
+    int CoreThreadGroup;
+    int CoreSiblings[MAX_CORES];
+    int NumberOfCoreSiblings;
+    int CoreSiblingNumber;
+    int ThreadSiblings[MAX_CORES];
+    int ThreadSiblingNumber;
+
+    if (sched_getaffinity(0,sizeof(cpu_set_t),&AffinityMask) != 0) {
+        MyPrintf(Options,VERBOSITY_ERROR,"Could not get core numbers\n");
+        exit(EXIT_FAILURE);
+    }
+    CPUArchitecture.NumberOfCPUs = 0;
+    CPUArchitecture.NumberOfThreads = 0;
+    CPUArchitecture.NumberOfCores = CPU_COUNT(&AffinityMask);
+    if (CPUArchitecture.NumberOfCores > MAX_CORES) {
+        MyPrintf(Options,VERBOSITY_ERROR,"Number of cores %d exceed maximum %d\n",
+CPUArchitecture.NumberOfCores,MAX_CORES);
+        exit(EXIT_FAILURE);
+    }
+//DEBUG printf("There are %d cores\n",CPUArchitecture.NumberOfCores);
+    CoreThreadGroup = 0;
+    for (CoreNumber= 0;CoreNumber < CPUArchitecture.NumberOfCores;CoreNumber++) {
+//----If the core is in this process's set
+        if (CPU_ISSET(CoreNumber,&AffinityMask)) {
+            CPUArchitecture.NumberOfCPUs++;
+//DEBUG printf("Core number %d is available\n",CoreNumber);
+            NumberOfCoreSiblings = GetSiblings(Options,CoreNumber,"core",CoreSiblings);
+//DEBUG printf("Core %d has %d core siblines\n",CoreNumber,NumberOfCoreSiblings);
+            for (CoreSiblingNumber = 0;CoreSiblingNumber < NumberOfCoreSiblings;
+CoreSiblingNumber++) {
+//DEBUG printf("Dealing with core sibling of %d, sibling is %d\n",CoreNumber,CoreSiblings[CoreSiblingNumber]);
+//----If this group of threads has not been dealt with yet
+                if (CPU_ISSET(CoreSiblings[CoreSiblingNumber],&AffinityMask)) {
+                    CPUArchitecture.NumberOfThreads = GetSiblings(Options,
+CoreSiblings[CoreSiblingNumber],"thread",ThreadSiblings);
+//DEBUG printf("Core sibling %d has %d thread siblings\n",CoreSiblings[CoreSiblingNumber],CPUArchitecture.NumberOfThreads);
+                    if (CPUArchitecture.NumberOfThreads > MAX_THREADS) {
+                        MyPrintf(Options,VERBOSITY_ERROR,"Number of thread %d exceed maximum %d\n",
+CPUArchitecture.NumberOfThreads,MAX_THREADS);
+                        exit(EXIT_FAILURE);
+                    }
+                    for (ThreadSiblingNumber = 0;
+ThreadSiblingNumber < CPUArchitecture.NumberOfThreads;ThreadSiblingNumber++) {
+                        CPUArchitecture.CoreAndThreadNumbers[ThreadSiblingNumber]
+[CoreThreadGroup] = ThreadSiblings[ThreadSiblingNumber];
+                        CPU_CLR(ThreadSiblings[ThreadSiblingNumber],&AffinityMask);
+//DEBUG printf("Core %d stored at thread row %d for core column %d\n",ThreadSiblings[ThreadSiblingNumber],ThreadSiblingNumber,CoreThreadGroup);
+                    }
+                    CoreThreadGroup++;
+                } else {
+//DEBUG printf("already dealt with core %d\n",CoreSiblings[CoreSiblingNumber]);
+                }
+            }
+        }
+    }
+
+    return(CPUArchitecture);
 }
 //--------------------------------------------------------------------------------------------------
 //----Fill an array of PIDS from .procs
@@ -623,6 +730,15 @@ int main(int argc, char* argv[]) {
 
     Options = ProcessOptions(argc,argv);
 
+    CPUArchitecture = GetCPUArchitecture(Options);
+    if (Options.ReportCPUArchitecture) {
+        ReportCPUArchitecture(Options,CPUArchitecture);
+//----If only reporting, exit now
+        if (strlen(Options.ProgramToControl) == 0) {
+            exit(EXIT_SUCCESS);
+        }
+    }
+
     ParentPID = getpid();
     MySnprintf(CGroupDir,MAX_STRING,"%s/%d",CGROUPS_DIR,ParentPID);
     MySnprintf(CGroupProcsFile,MAX_STRING,"%s/%s",CGroupDir,"cgroup.procs");
@@ -649,8 +765,6 @@ int main(int argc, char* argv[]) {
         MyPrintf(Options,VERBOSITY_ERROR,"Could not wait for child signal");
         exit(EXIT_FAILURE);
     }
-    
-    CPUArchitecture = GetCPUArchitecture(Options);
 
     if ((ChildPID = fork()) == -1) {
         MyPrintf(Options,VERBOSITY_ERROR,"Could not fork() for child processing");

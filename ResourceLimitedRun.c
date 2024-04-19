@@ -5,6 +5,7 @@
 #include <signal.h>
 #include <limits.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -42,12 +43,21 @@ typedef struct {
     int CPULimit;
     int WCLimit;
     int RAMLimit;
+    int CoreIds[MAX_CORES];
+    int NumberOfCores;
     BOOLEAN TimeStamps;
     String ProgramToControl;
     FILE* ProgramOutputFile;
     BOOLEAN UseHyperThreading;
     BOOLEAN ReportCPUArchitecture;
 } OptionsType;
+
+typedef struct {
+    String CGroupDir;
+    String CGroupProcsFile;
+    String CPUStatFile;
+    String RAMStatFile;
+} CGroupFileNamesType;
 
 #define MAX_THREADS 2
 typedef struct {
@@ -121,6 +131,39 @@ char * SignalName(int Signal) {
     }
 }
 //--------------------------------------------------------------------------------------------------
+int ExpandCoreIds(char * Request,int * CoreIds) {
+
+    int NumberOfIds;
+    char * CSV;
+    char * Dash;
+    int Start,End,Number;
+
+    NumberOfIds = 0;
+    CSV = strtok(Request,",");
+//DEBUG printf("first comma token is %s\n",CSV);
+    while (CSV != NULL) {
+//----If a range expand
+        if ((Dash = strchr(CSV,'-')) != NULL) {
+//DEBUG printf("dash range found\n");
+            End = atoi(Dash+1);
+            Dash = '\0';
+            Start = atoi(CSV);
+            for (Number = Start; Number <= End; Number++) {
+//DEBUG printf("adding %d\n",Number);
+                CoreIds[NumberOfIds++] = Number;
+            }
+//----Otherwise take as is
+        } else {
+//DEBUG printf("adding plain value %d\n",atoi(CSV));
+            CoreIds[NumberOfIds++] = atoi(CSV);
+        }
+        CSV = strtok(NULL," ");
+//DEBUG printf("next comma token is %s\n",CSV);
+    }
+
+    return(NumberOfIds);
+}
+//--------------------------------------------------------------------------------------------------
 //----Process options and fills out the struct with user's command line arguemnts
 OptionsType ProcessOptions(int argc, char* argv[]) {
 
@@ -134,6 +177,7 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
         {"cpu-limit",               required_argument, NULL, 'C'},
         {"wall-clock-limit",        required_argument, NULL, 'W'},
         {"mem-soft-limit",          required_argument, NULL, 'M'},
+        {"cores",                   required_argument, NULL, 'c'},
         {"use-hyperthreading",      no_argument,       NULL, 'y'},
         {"report-cpu-architecture", no_argument,       NULL, 'a'},
         {"help",                    no_argument,       NULL, 'h'},
@@ -146,13 +190,14 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
     Options.CPULimit = -1;
     Options.WCLimit = -1;
     Options.RAMLimit = -1;
+    Options.NumberOfCores = 0;
     Options.TimeStamps = FALSE;
     strcpy(Options.ProgramToControl,"");
     Options.ProgramOutputFile = NULL;
     Options.UseHyperThreading = FALSE;
     Options.ReportCPUArchitecture = FALSE;
 
-    while ((option = getopt_long(argc,argv,"yao:tb:C:W:M:?h",LongOptions,
+    while ((option = getopt_long(argc,argv,"yao:tb:C:W:M:c:?h",LongOptions,
 &OptionStartIndex)) != -1) {
         switch(option) {
 //---Flag options
@@ -185,6 +230,9 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
             case 'M':
                 Options.RAMLimit= atoi(optarg);
                 break;
+            case 'c':
+                Options.NumberOfCores = ExpandCoreIds(optarg,Options.CoreIds);
+                break;
             case '?':
             case 'h':
                 MyPrintf(Options,VERBOSITY_NONE,"HELP\n");
@@ -197,7 +245,7 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
         }
     }
 //----The program to control must be next
-    if (optind > argc) {
+    if (optind <= argc) {
         strcpy(Options.ProgramToControl,argv[optind++]);
         MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,
 "CPU limit %d, WC limit %d, RAM limit %d, Program %s\n",Options.CPULimit,
@@ -246,10 +294,6 @@ int GetSiblings(OptionsType Options,int CoreNumber,char * SiblingType,int * Sibl
     String FileName;
     FILE* CPUFile;
     String SiblingsLine;
-    int NumberOfSiblings;
-    char * CSV;
-    char * Dash;
-    int Start,End,Number;
 
     MySnprintf(FileName,MAX_STRING,"/sys/devices/system/cpu/cpu%d/topology/%s_siblings_list",
 CoreNumber,SiblingType);
@@ -263,30 +307,7 @@ CoreNumber,SiblingType);
     }
     fclose(CPUFile);
 //DEBUG printf("for %s got line %s\n",SiblingType,SiblingsLine);
-    NumberOfSiblings = 0;
-    CSV = strtok(SiblingsLine,",");
-//DEBUG printf("first comma token is %s\n",CSV);
-    while (CSV != NULL) {
-//----If a range expand
-        if ((Dash = strchr(CSV,'-')) != NULL) {
-//DEBUG printf("dash range found\n");
-            End = atoi(Dash+1);
-            Dash = '\0';
-            Start = atoi(CSV);
-            for (Number = Start; Number <= End; Number++) {
-//DEBUG printf("adding %d\n",Number);
-                Siblings[NumberOfSiblings++] = Number;
-            }
-//----Otherwise take as is
-        } else {
-//DEBUG printf("adding plain value %d\n",atoi(CSV));
-            Siblings[NumberOfSiblings++] = atoi(CSV);
-        }
-        CSV = strtok(NULL," ");
-//DEBUG printf("next comma token is %s\n",CSV);
-    }
-
-    return(NumberOfSiblings);
+    return(ExpandCoreIds(SiblingsLine,Siblings));
 }
 //--------------------------------------------------------------------------------------------------
 CPUArchitectureType GetCPUArchitecture(OptionsType Options) {
@@ -351,6 +372,71 @@ ThreadSiblingNumber < CPUArchitecture.NumberOfThreads;ThreadSiblingNumber++) {
     }
 
     return(CPUArchitecture);
+}
+//--------------------------------------------------------------------------------------------------
+void ChildSaysGo(int TheSignal) {
+
+    //printf("Child told parent to start monitoring\n");
+}
+//--------------------------------------------------------------------------------------------------
+void UserInterrupt(int TheSignal) {
+
+//DEBUG printf("User did ^C to %d\n",getpid());
+    GlobalInterrupted = TRUE;
+}
+//--------------------------------------------------------------------------------------------------
+void SetUpSignalHandling(OptionsType Options) {
+
+    struct sigaction SignalHandling;
+
+    GlobalInterrupted = FALSE;
+    SignalHandling.sa_handler = UserInterrupt;
+    SignalHandling.sa_flags = SA_RESTART;
+    if (sigaction(SIGINT,&SignalHandling,NULL) != 0) {
+        MyPrintf(Options,VERBOSITY_ERROR,"Could not wait for ^C signal");
+        exit(EXIT_FAILURE);
+    }
+    SignalHandling.sa_handler = ChildSaysGo;
+    SignalHandling.sa_flags = 0;
+    if (sigaction(SIGCONT,&SignalHandling,NULL) != 0) {
+        MyPrintf(Options,VERBOSITY_ERROR,"Could not wait for child signal");
+        exit(EXIT_FAILURE);
+    }
+}
+//--------------------------------------------------------------------------------------------------
+CGroupFileNamesType MakeCGroupFileNames(int ParentPID) {
+
+    CGroupFileNamesType CGroupFileNames;
+
+    MySnprintf(CGroupFileNames.CGroupDir,MAX_STRING,"%s/%d",CGROUPS_DIR,ParentPID);
+    MySnprintf(CGroupFileNames.CGroupProcsFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
+"cgroup.procs");
+    MySnprintf(CGroupFileNames.CPUStatFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
+"cpu.stat");
+    MySnprintf(CGroupFileNames.RAMStatFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
+"memory.current");
+
+    return(CGroupFileNames);
+}
+//--------------------------------------------------------------------------------------------------
+void MakeCGroupDirectory(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
+
+    if (mkdir(CGroupFileNames.CGroupDir,0755) != 0) {
+        MyPrintf(Options,VERBOSITY_ERROR,"Could not create %s",CGroupFileNames.CGroupDir);
+        exit(EXIT_FAILURE);
+    }
+}
+//--------------------------------------------------------------------------------------------------
+void RemoveCGroupDirectory(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
+
+    if (rmdir(CGroupFileNames.CGroupDir) != 0) {
+        MyPrintf(Options,VERBOSITY_ERROR,"Could not remove %s",CGroupFileNames.CGroupDir);
+        exit(EXIT_FAILURE);
+    }
+}
+//--------------------------------------------------------------------------------------------------
+void LimitCores(OptionsType Options) {
+
 }
 //--------------------------------------------------------------------------------------------------
 //----Fill an array of PIDS from .procs
@@ -531,7 +617,6 @@ PIDs[PIDsindex],SignalName(WhichSignal));
     }
 }
 //--------------------------------------------------------------------------------------------------
-//--------------------------------------------------------------------------------------------------
 void StartChildProgram(OptionsType Options,char * CGroupProcsFile,int PIDOfRLR) {
 
     int ChildPID;
@@ -639,17 +724,6 @@ CPUUsage(Options,CPUStatFile));
     exit(EXIT_SUCCESS);
 }
 //--------------------------------------------------------------------------------------------------
-void ChildSaysGo(int TheSignal) {
-
-    //printf("Child told parent to start monitoring\n");
-}
-//--------------------------------------------------------------------------------------------------
-void UserInterrupt(int TheSignal) {
-
-//DEBUG printf("User did ^C to %d\n",getpid());
-    GlobalInterrupted = TRUE;
-}
-//--------------------------------------------------------------------------------------------------
 void MonitorDescendantProcesses(OptionsType Options,char * CGroupProcsFile,char * CPUStatFile,
 char * RAMStatFile) {
 
@@ -717,16 +791,10 @@ TRUE));
 int main(int argc, char* argv[]) {
 
     OptionsType Options;
-    String CGroupDir;
-    String CGroupProcsFile;
-    String CPUStatFile;
-    String RAMStatFile;
-    String ShellCommand;
+    CGroupFileNamesType CGroupFileNames;
     CPUArchitectureType CPUArchitecture;
-    int CoreNumbers[MAX_CORES];
     int ParentPID;
     int ChildPID;
-    struct sigaction SignalHandling;
 
     Options = ProcessOptions(argc,argv);
 
@@ -740,31 +808,10 @@ int main(int argc, char* argv[]) {
     }
 
     ParentPID = getpid();
-    MySnprintf(CGroupDir,MAX_STRING,"%s/%d",CGROUPS_DIR,ParentPID);
-    MySnprintf(CGroupProcsFile,MAX_STRING,"%s/%s",CGroupDir,"cgroup.procs");
-    MySnprintf(CPUStatFile,MAX_STRING,"%s/%s",CGroupDir,"cpu.stat");
-    MySnprintf(RAMStatFile,MAX_STRING,"%s/%s",CGroupDir,"memory.current");
-
-    MySnprintf(ShellCommand,MAX_STRING,"mkdir %s",CGroupDir);
-    MyPrintf(Options,VERBOSITY_BIG_STEPS,"About to do %s\n",ShellCommand);
-    system(ShellCommand);
-    MySnprintf(ShellCommand,MAX_STRING,"chown -R %d:%d %s",getuid(),getgid(),CGroupDir);
-    MyPrintf(Options,VERBOSITY_BIG_STEPS,"About to do %s\n",ShellCommand);
-    system(ShellCommand);
-
-    GlobalInterrupted = FALSE;
-    SignalHandling.sa_handler = UserInterrupt;
-    SignalHandling.sa_flags = SA_RESTART;
-    if (sigaction(SIGINT,&SignalHandling,NULL) != 0) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not wait for ^C signal");
-        exit(EXIT_FAILURE);
-    }
-    SignalHandling.sa_handler = ChildSaysGo;
-    SignalHandling.sa_flags = 0;
-    if (sigaction(SIGCONT,&SignalHandling,NULL) != 0) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not wait for child signal");
-        exit(EXIT_FAILURE);
-    }
+    CGroupFileNames = MakeCGroupFileNames(ParentPID);
+    MakeCGroupDirectory(Options,CGroupFileNames);
+    SetUpSignalHandling(Options);
+    LimitCores(Options);
 
     if ((ChildPID = fork()) == -1) {
         MyPrintf(Options,VERBOSITY_ERROR,"Could not fork() for child processing");
@@ -772,7 +819,8 @@ int main(int argc, char* argv[]) {
     }
 
     if (ChildPID == 0) {
-        StartChildProcessing(Options,CGroupProcsFile,CPUStatFile,ParentPID);
+        StartChildProcessing(Options,CGroupFileNames.CGroupProcsFile,CGroupFileNames.CPUStatFile,
+ParentPID);
     } else {
         MyPrintf(Options,VERBOSITY_DEBUG,"In RLR with PID %d\n",ParentPID);
         MyPrintf(Options,VERBOSITY_RLR_ACTIONS,
@@ -780,17 +828,16 @@ int main(int argc, char* argv[]) {
         pause();
         MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Child of %d has started\n",ChildPID);
 //----Start the clocks
-        CPUUsage(Options,CPUStatFile);
+        CPUUsage(Options,CGroupFileNames.CPUStatFile);
         WCUsage(Options);
-        MonitorDescendantProcesses(Options,CGroupProcsFile,CPUStatFile,RAMStatFile);
+        MonitorDescendantProcesses(Options,CGroupFileNames.CGroupProcsFile,
+CGroupFileNames.CPUStatFile,CGroupFileNames.RAMStatFile);
     }
 
     if (Options.ProgramOutputFile != NULL) {
         fclose(Options.ProgramOutputFile);
     }
-    MySnprintf(ShellCommand,MAX_STRING,"rmdir %s",CGroupDir);
-    MyPrintf(Options,VERBOSITY_BIG_STEPS,"About to do %s\n",ShellCommand);
-    system(ShellCommand);
+    RemoveCGroupDirectory(Options,CGroupFileNames);
 
     return(EXIT_SUCCESS);
 }

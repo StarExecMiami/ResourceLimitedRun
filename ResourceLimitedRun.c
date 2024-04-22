@@ -29,6 +29,12 @@
 #define TRUE 1
 #define FALSE 0
 
+#define BYTES_PER_MIB 1048576.0
+#define SECONDS_BETWEEN_RESOURCE_MONITORING 0
+#define NANO_SECONDS_BETWEEN_RESOURCE_MONITORING 100000000
+#define MINIMUM_CPU_USAGE_BETWEEN_RESOURCE_REPORTS 1.0
+#define MINIMUM_WC_USAGE_BETWEEN_RESOURCE_REPORTS 1.0
+
 #define MAX_ARGS 256
 #define MAX_STRING 1024
 #define MAX_PIDS 1024
@@ -43,11 +49,12 @@ typedef struct {
     int CPULimit;
     int WCLimit;
     int RAMLimit;
-    int CoreIds[MAX_CORES];
-    int NumberOfCores;
+    int CoresToUse[MAX_CORES];
+    int NumberOfCoresToUse;
     BOOLEAN TimeStamps;
     String ProgramToControl;
     FILE* ProgramOutputFile;
+    String VarFileName;
     BOOLEAN UseHyperThreading;
     BOOLEAN ReportCPUArchitecture;
 } OptionsType;
@@ -57,6 +64,7 @@ typedef struct {
     String CGroupProcsFile;
     String CPUStatFile;
     String RAMStatFile;
+    String CPUSetFile;
 } CGroupFileNamesType;
 
 #define MAX_THREADS 2
@@ -131,7 +139,7 @@ char * SignalName(int Signal) {
     }
 }
 //--------------------------------------------------------------------------------------------------
-int ExpandCoreIds(char * Request,int * CoreIds) {
+int ExpandCoresToUse(char * Request,int * CoresToUse) {
 
     int NumberOfIds;
     char * CSV;
@@ -150,12 +158,12 @@ int ExpandCoreIds(char * Request,int * CoreIds) {
             Start = atoi(CSV);
             for (Number = Start; Number <= End; Number++) {
 //DEBUG printf("adding %d\n",Number);
-                CoreIds[NumberOfIds++] = Number;
+                CoresToUse[NumberOfIds++] = Number;
             }
 //----Otherwise take as is
         } else {
 //DEBUG printf("adding plain value %d\n",atoi(CSV));
-            CoreIds[NumberOfIds++] = atoi(CSV);
+            CoresToUse[NumberOfIds++] = atoi(CSV);
         }
         CSV = strtok(NULL," ");
 //DEBUG printf("next comma token is %s\n",CSV);
@@ -171,6 +179,7 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
     OptionsType Options;
 
     static struct option LongOptions[] = {
+        {"report-cpu-architecture", no_argument,       NULL, 'a'},
         {"output",                  required_argument, NULL, 'o'},
         {"timestamp",               no_argument,       NULL, 't'},
         {"verbosity",               required_argument, NULL, 'b'},
@@ -179,7 +188,7 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
         {"mem-soft-limit",          required_argument, NULL, 'M'},
         {"cores",                   required_argument, NULL, 'c'},
         {"use-hyperthreading",      no_argument,       NULL, 'y'},
-        {"report-cpu-architecture", no_argument,       NULL, 'a'},
+        {"var",                     required_argument, NULL, 'v'},
         {"help",                    no_argument,       NULL, 'h'},
         {NULL,0,NULL,0}
     };
@@ -190,28 +199,26 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
     Options.CPULimit = -1;
     Options.WCLimit = -1;
     Options.RAMLimit = -1;
-    Options.NumberOfCores = 0;
+    Options.NumberOfCoresToUse = 0;
     Options.TimeStamps = FALSE;
     strcpy(Options.ProgramToControl,"");
     Options.ProgramOutputFile = NULL;
+    strcpy(Options.VarFileName,"");
     Options.UseHyperThreading = FALSE;
     Options.ReportCPUArchitecture = FALSE;
 
-    while ((option = getopt_long(argc,argv,"yao:tb:C:W:M:c:?h",LongOptions,
+    while ((option = getopt_long(argc,argv,"ao:tb:C:W:M:c:yv:?h",LongOptions,
 &OptionStartIndex)) != -1) {
         switch(option) {
 //---Flag options
             case 0:
-                break;
-            case 'y':
-                Options.UseHyperThreading = TRUE;
                 break;
             case 'a':
                 Options.ReportCPUArchitecture = TRUE;
                 break;
             case 'o':
                 if ((Options.ProgramOutputFile = fopen(optarg,"w")) == NULL) {
-                    MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",optarg);
+                    MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for writing\n",optarg);
                     exit(EXIT_FAILURE);
                 }
                 break;
@@ -231,7 +238,13 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
                 Options.RAMLimit= atoi(optarg);
                 break;
             case 'c':
-                Options.NumberOfCores = ExpandCoreIds(optarg,Options.CoreIds);
+                Options.NumberOfCoresToUse = ExpandCoresToUse(optarg,Options.CoresToUse);
+                break;
+            case 'y':
+                Options.UseHyperThreading = TRUE;
+                break;
+            case 'v':
+                strcpy(Options.VarFileName,optarg);
                 break;
             case '?':
             case 'h':
@@ -307,7 +320,7 @@ CoreNumber,SiblingType);
     }
     fclose(CPUFile);
 //DEBUG printf("for %s got line %s\n",SiblingType,SiblingsLine);
-    return(ExpandCoreIds(SiblingsLine,Siblings));
+    return(ExpandCoresToUse(SiblingsLine,Siblings));
 }
 //--------------------------------------------------------------------------------------------------
 CPUArchitectureType GetCPUArchitecture(OptionsType Options) {
@@ -415,6 +428,8 @@ CGroupFileNamesType MakeCGroupFileNames(int ParentPID) {
 "cpu.stat");
     MySnprintf(CGroupFileNames.RAMStatFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
 "memory.current");
+    MySnprintf(CGroupFileNames.CPUSetFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
+"cpuset.cpus");
 
     return(CGroupFileNames);
 }
@@ -435,8 +450,52 @@ void RemoveCGroupDirectory(OptionsType Options,CGroupFileNamesType CGroupFileNam
     }
 }
 //--------------------------------------------------------------------------------------------------
-void LimitCores(OptionsType Options) {
+void LimitCores(OptionsType Options,CPUArchitectureType CPUArchitecture,
+CGroupFileNamesType CGroupFileNames) {
 
+    int CoreNumber,ThreadNumber;
+    String CoreList;
+    String CommaCore;
+    FILE* CPUFile;
+
+    if (Options.NumberOfCoresToUse > 0) {
+        strcpy(CoreList,"");
+        for (CoreNumber = 0;CoreNumber < Options.NumberOfCoresToUse;CoreNumber++) {
+//----Check user has not asked for something impossible
+            if (Options.CoresToUse[CoreNumber] > CPUArchitecture.NumberOfCores) {
+                MyPrintf(Options,VERBOSITY_ERROR,
+"Request for core %d, but there are only %d cores\n",Options.CoresToUse[CoreNumber],
+CPUArchitecture.NumberOfCores);
+                exit(EXIT_FAILURE);
+            }
+            if (CoreNumber > 0) {
+                strcat(CoreList,",");
+            }
+            sprintf(CommaCore,"%d",
+CPUArchitecture.CoreAndThreadNumbers[0][Options.CoresToUse[CoreNumber]]);
+            strcat(CoreList,CommaCore);
+            if (Options.UseHyperThreading) {
+                for (ThreadNumber = 1;ThreadNumber < CPUArchitecture.NumberOfThreads;
+ThreadNumber++) {
+                    sprintf(CommaCore,",%d",
+CPUArchitecture.CoreAndThreadNumbers[ThreadNumber][Options.CoresToUse[CoreNumber]]);
+                    strcat(CoreList,CommaCore);
+                }
+            }
+        }
+        MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,"The physical cores to use are %s\n",CoreList);
+
+        if ((CPUFile = fopen(CGroupFileNames.CPUSetFile,"w")) == NULL) {
+            MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for writing\n",
+CGroupFileNames.CPUSetFile);
+            exit(EXIT_FAILURE);
+        }
+        if (fputs(CoreList,CPUFile) == EOF) {
+            MyPrintf(Options,VERBOSITY_ERROR,"Could not write to %s\n",CGroupFileNames.CPUSetFile);
+            exit(EXIT_FAILURE);
+        }
+        fclose(CPUFile);
+    }
 }
 //--------------------------------------------------------------------------------------------------
 //----Fill an array of PIDS from .procs
@@ -489,10 +548,11 @@ double RAMUsage(OptionsType Options,char * RAMStatFile,BOOLEAN ReportMax) {
     if (Bytes > MaxBytes) {
         MaxBytes = Bytes;
     }
+//----Report in MiB
     if (ReportMax) {
-        return(MaxBytes/1048576.0);
+        return(MaxBytes/BYTES_PER_MIB);
     } else {
-        return(Bytes/1048576.0);
+        return(Bytes/BYTES_PER_MIB);
     }
 }
 //--------------------------------------------------------------------------------------------------
@@ -516,7 +576,8 @@ double WCUsage(OptionsType Options) {
 }
 //--------------------------------------------------------------------------------------------------
 //----Get CPU usage from cpu.stat
-double CPUUsage(OptionsType Options,char * CPUStatFile) {
+double CPUUsage(OptionsType Options,char * CPUStatFile,double * CPUUsedByUser,
+double * CPUUsedBySystem) {
 
 /*usage_usec 63559383
 user_usec 63316412
@@ -530,24 +591,48 @@ burst_usec 0*/
 
     String ShellCommand;
     FILE* ShellFile;
-    long MicroSeconds;
+    long MicroSeconds,MicroSecondsUser,MicroSecondsSystem;
+    double Seconds,SecondsUser,SecondsSystem;
     static double StartMicroSeconds = -1.0;
+    static double StartMicroSecondsUser = -1.0;
+    static double StartMicroSecondsSystem = -1.0;
 
     MySnprintf(ShellCommand,MAX_STRING,"cat %s",CPUStatFile);
     if ((ShellFile = popen(ShellCommand,"r")) == NULL) {
         MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",CPUStatFile);
         exit(EXIT_FAILURE);
     }
-    fscanf(ShellFile,"usage_usec %ld",&MicroSeconds);
+    fscanf(ShellFile,"usage_usec %ld\n",&MicroSeconds);
+    fscanf(ShellFile,"user_usec %ld\n",&MicroSecondsUser);
+    fscanf(ShellFile,"system_usec %ld\n",&MicroSecondsSystem);
+//DEBUG printf("ms %ld, msu %ld, mss %ld\n",MicroSeconds,MicroSecondsUser,MicroSecondsSystem);
     pclose(ShellFile);
+
     if (StartMicroSeconds < 0.0) {
         StartMicroSeconds = MicroSeconds;
         MyPrintf(Options,VERBOSITY_ALL,"CPU offset is %.2fs\n",StartMicroSeconds/1000000.0);
+        StartMicroSecondsUser = MicroSecondsUser;
+        MyPrintf(Options,VERBOSITY_ALL,"CPU offset user is %.2fs\n",
+StartMicroSecondsUser/1000000.0);
+        StartMicroSecondsSystem = MicroSecondsSystem;
+        MyPrintf(Options,VERBOSITY_ALL,"CPU offset system is %.2fs\n",
+StartMicroSecondsSystem/1000000.0);
     }
-    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"CPUUsage is %.2fs\n",
-(MicroSeconds-StartMicroSeconds)/1000000.0);
 
-    return(MicroSeconds/1000000.0);
+    Seconds = (MicroSeconds-StartMicroSeconds)/1000000.0;
+    SecondsUser = (MicroSecondsUser-StartMicroSecondsUser)/1000000.0;
+    SecondsSystem = (MicroSecondsSystem-StartMicroSecondsSystem)/1000000.0;
+
+    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"CPUUsage is       %.2fs\n",Seconds);
+    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"CPUUsageUser is   %.2fs\n",SecondsUser);
+    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"CPUUsageSystem is %.2fs\n",SecondsSystem);
+    if (CPUUsedByUser != NULL) {
+        *CPUUsedByUser = SecondsUser;
+    }
+    if (CPUUsedBySystem != NULL) {
+        *CPUUsedBySystem = SecondsSystem;
+    }
+    return(Seconds);
 }
 //--------------------------------------------------------------------------------------------------
 void KillProcesses(OptionsType Options,int NumberOfProccesses,int * PIDs,int WhichSignal) {
@@ -687,22 +772,22 @@ int PIDOfRLR) {
         setbuf(stdout,NULL);
         StartChildProgram(Options,CGroupProcsFile,PIDOfRLR);
     } else {
+        strcpy(TimeStamp,"");
+        close(Pipe[1]);
+        PipeReader = fdopen(Pipe[0],"r");
         MyPrintf(Options,VERBOSITY_RLR_ACTIONS,
 "Wait for child %d to create and add itself to a cgroup\n",ChildPID);
         pause();
         MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Child %d has started\n",ChildPID);
-//----Start the clocks, hopefully about the same time as the parent
-        CPUUsage(Options,CPUStatFile);
+//----Start the clocks, hopefully about the same time as the parent - both signalled by job
+        CPUUsage(Options,CPUStatFile,NULL,NULL);
         WCUsage(Options);
-        close(Pipe[1]);
-        PipeReader = fdopen(Pipe[0],"r");
         MyPrintf(Options,VERBOSITY_DEBUG,"Start reading from child %d\n",ChildPID);
-        strcpy(TimeStamp,"");
         while (fgets(ChildOutput,MAX_STRING,PipeReader) != NULL) {
             if (Options.TimeStamps) {
 //----Output WC/CPU
                 MySnprintf(TimeStamp,MAX_STRING,"%6.2f/%6.2f\t",WCUsage(Options),
-CPUUsage(Options,CPUStatFile));
+CPUUsage(Options,CPUStatFile,NULL,NULL));
             }
             MyPrintf(Options,VERBOSITY_STDOUT_ONLY,"%s%s",TimeStamp,ChildOutput);
             if (Options.ProgramOutputFile != NULL) {
@@ -713,7 +798,7 @@ CPUUsage(Options,CPUStatFile));
         fclose(PipeReader);
         if (Options.TimeStamps) {
             MySnprintf(TimeStamp,MAX_STRING,"%6.2f/%6.2f\t",WCUsage(Options),
-CPUUsage(Options,CPUStatFile));
+CPUUsage(Options,CPUStatFile,NULL,NULL));
             MyPrintf(Options,VERBOSITY_STDOUT_ONLY,"%sEOF\n",TimeStamp);
             fflush(stdout);
             if (Options.ProgramOutputFile != NULL) {
@@ -721,30 +806,72 @@ CPUUsage(Options,CPUStatFile));
             }
         }
     }
-    exit(EXIT_SUCCESS);
 }
 //--------------------------------------------------------------------------------------------------
-void MonitorDescendantProcesses(OptionsType Options,char * CGroupProcsFile,char * CPUStatFile,
-char * RAMStatFile) {
+void ReportResourceUsage(OptionsType Options,CGroupFileNamesType CGroupFileNames,double WCLost) {
+
+    double CPUUsed, WCUsed, RAMUsed, CPUUsedByUser, CPUUsedBySystem;
+    FILE* VarFile;
+
+    CPUUsed = CPUUsage(Options,CGroupFileNames.CPUStatFile,&CPUUsedByUser,&CPUUsedBySystem);
+//----WC might be 1s too high due to sleep in loop to allow processes to die
+    WCUsed = WCUsage(Options) - WCLost;
+    RAMUsed = RAMUsage(Options,CGroupFileNames.RAMStatFile,TRUE);
+
+    MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,"Final CPU usage: %6.2fs\n",CPUUsed);
+    MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,"Final WC  usage: %6.2fs\n",WCUsed);
+    MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,"Final RAM usage: %6.2fMiB\n",RAMUsed);
+
+    if (strlen(Options.VarFileName) > 0) {
+        if ((VarFile = fopen(Options.VarFileName,"w")) == NULL) {
+            MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for writing\n",Options.VarFileName);
+            exit(EXIT_FAILURE);
+        }
+
+        fprintf(VarFile,"# WCTIME: wall clock time in seconds\n");
+        fprintf(VarFile,"WCTIME=%.2f\n",WCUsed);
+        fprintf(VarFile,"# CPUTIME: CPU time in seconds\n");
+        fprintf(VarFile,"CPUTIME=%.2f\n",CPUUsed);
+        fprintf(VarFile,"# USERTIME: CPU time spent in user mode in seconds\n");
+        fprintf(VarFile,"USERTIME=%.2f\n",CPUUsedByUser);
+        fprintf(VarFile,"# SYSTEMTIME: CPU time spent in system mode in seconds\n");
+        fprintf(VarFile,"SYSTEMTIME=%.2f\n",CPUUsedBySystem);
+        fprintf(VarFile,"# CPUUSAGE: CPUTIME/WCTIME in percent\n");
+        fprintf(VarFile,"CPUUSAGE=%.1f\n",100.0*CPUUsed/(WCUsed != 0 ? WCUsed : 1));
+        // fprintf(VarFile,"# MAXVM: maximum virtual memory used in KiB\n");
+        // fprintf(VarFile,"MAXVM=" << maxVSize << endl;
+
+        fclose(VarFile);
+    }
+}
+//--------------------------------------------------------------------------------------------------
+void MonitorDescendantProcesses(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
 
     int NumberOfProccessesInCGroup;
     BOOLEAN DoneSomeKilling;
     int ReapedPID;
     int PIDsInCGroup[MAX_PIDS];
     double CPUUsed, WCUsed, RAMUsed;
+    double LastCPUUsed, LastWCUsed;
+    struct timespec SleepRequired;
     double WCLost;
 
     WCLost = 0.0;
+    LastCPUUsed = 0.0;
+    LastWCUsed = 0.0;
+    SleepRequired.tv_sec = SECONDS_BETWEEN_RESOURCE_MONITORING;
+    SleepRequired.tv_nsec = NANO_SECONDS_BETWEEN_RESOURCE_MONITORING;
 //----Watch the processes
-    NumberOfProccessesInCGroup = NumberOfProcesses(Options,CGroupProcsFile,PIDsInCGroup);
+    NumberOfProccessesInCGroup = NumberOfProcesses(Options,CGroupFileNames.CGroupProcsFile,
+PIDsInCGroup);
     while (NumberOfProccessesInCGroup > 0) {
         MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Number of processes is: %d\n",
 NumberOfProccessesInCGroup);
         DoneSomeKilling = FALSE;
 //----Always get resource usages for reporting, even if not limiting
-        CPUUsed = CPUUsage(Options,CPUStatFile);
+        CPUUsed = CPUUsage(Options,CGroupFileNames.CPUStatFile,NULL,NULL);
         WCUsed = WCUsage(Options);
-        RAMUsed = RAMUsage(Options,RAMStatFile,FALSE);
+        RAMUsed = RAMUsage(Options,CGroupFileNames.RAMStatFile,FALSE);
         if (Options.CPULimit > 0 && CPUUsed > Options.CPULimit) {
             KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGXCPU);
             DoneSomeKilling = TRUE;
@@ -761,31 +888,33 @@ NumberOfProccessesInCGroup);
             KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGINT);
             DoneSomeKilling = TRUE;
         }
-        MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,"CPU: %.2fs WC: %.2fs RAM: %.2fMiB\n",
+        if (CPUUsed - LastCPUUsed > MINIMUM_CPU_USAGE_BETWEEN_RESOURCE_REPORTS |
+WCUsed - LastWCUsed > MINIMUM_WC_USAGE_BETWEEN_RESOURCE_REPORTS) {
+            LastCPUUsed = CPUUsed;
+            LastWCUsed = WCUsed;
+            MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,"CPU: %.2fs WC: %.2fs RAM: %.2fMiB\n",
 CPUUsed,WCUsed,RAMUsed);
-//----Reap zombies
-        sleep(1);
-        WCLost = 1.0;
-        if (DoneSomeKilling) {
-            while ((ReapedPID = waitpid(-1,NULL,WNOHANG)) > 0) {
-                MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Reaped killed or exited process %d\n",
-ReapedPID);
-            }
         }
-        NumberOfProccessesInCGroup = NumberOfProcesses(Options,CGroupProcsFile,PIDsInCGroup);
+        nanosleep(&SleepRequired,NULL);
+        WCLost = SleepRequired.tv_sec + SleepRequired.tv_nsec/1000000000.0;
+//----Reap zombies
+//        if (DoneSomeKilling) {
+//            while ((ReapedPID = waitpid(-1,NULL,WNOHANG)) > 0) {
+//                MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Reaped killed or exited process %d\n",
+//ReapedPID);
+//            }
+//        }
+        NumberOfProccessesInCGroup = NumberOfProcesses(Options,CGroupFileNames.CGroupProcsFile,
+PIDsInCGroup);
     }
     MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"No processes left\n");
-//----Reap zombies child (should not exist)
-    while ((ReapedPID = waitpid(-1,NULL,WNOHANG)) > 0) {
-        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Reaped exited process %d\n",ReapedPID);
-    }
-    MyPrintf(Options,VERBOSITY_BIG_STEPS,"Final CPU usage: %.2fs\n",
-CPUUsage(Options,CPUStatFile));
-//----WC might be 1s too high due to sleep in loop to allow processes to die
-    MyPrintf(Options,VERBOSITY_BIG_STEPS,"Final WC  usage: %.2fs\n",WCUsage(Options) - WCLost);
-    MyPrintf(Options,VERBOSITY_BIG_STEPS,"Final RAM usage: %.2fMiB\n",RAMUsage(Options,RAMStatFile,
-TRUE));
+//----Reap zombie child (should not exist)
+//    while ((ReapedPID = waitpid(-1,NULL,WNOHANG)) > 0) {
+//        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Reaped exited process %d\n",ReapedPID);
+//    }
 
+//----Final report, including VarFile
+    ReportResourceUsage(Options,CGroupFileNames,WCLost);
 }
 //--------------------------------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
@@ -795,6 +924,7 @@ int main(int argc, char* argv[]) {
     CPUArchitectureType CPUArchitecture;
     int ParentPID;
     int ChildPID;
+    int ChildStatus;
 
     Options = ProcessOptions(argc,argv);
 
@@ -811,7 +941,7 @@ int main(int argc, char* argv[]) {
     CGroupFileNames = MakeCGroupFileNames(ParentPID);
     MakeCGroupDirectory(Options,CGroupFileNames);
     SetUpSignalHandling(Options);
-    LimitCores(Options);
+    LimitCores(Options,CPUArchitecture,CGroupFileNames);
 
     if ((ChildPID = fork()) == -1) {
         MyPrintf(Options,VERBOSITY_ERROR,"Could not fork() for child processing");
@@ -821,6 +951,7 @@ int main(int argc, char* argv[]) {
     if (ChildPID == 0) {
         StartChildProcessing(Options,CGroupFileNames.CGroupProcsFile,CGroupFileNames.CPUStatFile,
 ParentPID);
+        exit(EXIT_SUCCESS);
     } else {
         MyPrintf(Options,VERBOSITY_DEBUG,"In RLR with PID %d\n",ParentPID);
         MyPrintf(Options,VERBOSITY_RLR_ACTIONS,
@@ -828,12 +959,11 @@ ParentPID);
         pause();
         MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Child of %d has started\n",ChildPID);
 //----Start the clocks
-        CPUUsage(Options,CGroupFileNames.CPUStatFile);
+        CPUUsage(Options,CGroupFileNames.CPUStatFile,NULL,NULL);
         WCUsage(Options);
-        MonitorDescendantProcesses(Options,CGroupFileNames.CGroupProcsFile,
-CGroupFileNames.CPUStatFile,CGroupFileNames.RAMStatFile);
+        MonitorDescendantProcesses(Options,CGroupFileNames);
+        waitpid(ChildPID,&ChildStatus,0);
     }
-
     if (Options.ProgramOutputFile != NULL) {
         fclose(Options.ProgramOutputFile);
     }

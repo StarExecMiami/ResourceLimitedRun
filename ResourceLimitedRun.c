@@ -54,6 +54,7 @@ typedef struct {
     BOOLEAN TimeStamps;
     String ProgramToControl;
     FILE* ProgramOutputFile;
+    FILE* RLROutputFile;
     String VarFileName;
     BOOLEAN UseHyperThreading;
     BOOLEAN ReportCPUArchitecture;
@@ -78,31 +79,49 @@ typedef struct {
 //--------------------------------------------------------------------------------------------------
 static BOOLEAN GlobalInterrupted;
 //--------------------------------------------------------------------------------------------------
-void MyPrintf(OptionsType Options,int RequiredVerbosity,char * Format,...) {
+void MyPrintf(OptionsType Options,int RequiredVerbosity,BOOLEAN AddPrefix,char * Format,...) {
 
     va_list ThingsToPrint;
     String FinalFormat;
+    String TheOutput;
 
-    if (Options.Verbosity >= RequiredVerbosity) {
+    if (Options.Verbosity >= RequiredVerbosity || Options.RLROutputFile != NULL) {
+        strcpy(FinalFormat,Format);
         switch (RequiredVerbosity) {
             case VERBOSITY_ERROR:
                 snprintf(FinalFormat,MAX_STRING,"ERROR: %s",Format);
                 break;
             case VERBOSITY_RESOURCE_USAGE:
-                snprintf(FinalFormat,MAX_STRING,"%%%% %s",Format);
+                if (AddPrefix) {
+                    snprintf(FinalFormat,MAX_STRING,"%%%% %s",Format);
+                }
                 break;
             case VERBOSITY_RLR_ACTIONS:
             case VERBOSITY_BIG_STEPS:
-                snprintf(FinalFormat,MAX_STRING,"RLR says: %s",Format);
+                if (AddPrefix) {
+                    snprintf(FinalFormat,MAX_STRING,"RLR says: %s",Format);
+                }
+                break;
+            case VERBOSITY_ALL:
+                if (AddPrefix) {
+                    snprintf(FinalFormat,MAX_STRING,"ALL says: %s",Format);
+                }
                 break;
             default:
-                strcpy(FinalFormat,Format);
                 break;
         }
         va_start(ThingsToPrint,Format);
-        vprintf(FinalFormat,ThingsToPrint);
-        fflush(stdout);
+        vsnprintf(TheOutput,MAX_STRING,FinalFormat,ThingsToPrint);
         va_end(ThingsToPrint);
+        if (Options.Verbosity >= RequiredVerbosity) {
+            printf("%s",TheOutput);
+            fflush(stdout);
+        }
+        if (Options.RLROutputFile != NULL && RequiredVerbosity != VERBOSITY_STDOUT_ONLY &&
+RequiredVerbosity != VERBOSITY_DEBUG) {
+            fprintf(Options.RLROutputFile,"%s",TheOutput);
+            fflush(Options.RLROutputFile);
+        }
     }
 }
 //--------------------------------------------------------------------------------------------------
@@ -115,30 +134,7 @@ void MySnprintf(char * PrintIntoHere,int LengthOfHere,char * Format,...) {
     va_end(ThingsToPrint);
 }
 //--------------------------------------------------------------------------------------------------
-char * SignalName(int Signal) {
-
-    switch (Signal) {
-        case SIGINT:
-            return("SIGINT");
-            break;
-        case SIGALRM:
-            return("SIGALRM");
-            break;
-        case SIGTERM:
-            return("SIGTERM");
-            break;
-        case SIGXCPU:
-            return("SIGXCPU");
-            break;
-        case SIGKILL:
-            return("SIGKILL");
-            break;
-        default:
-            return("UNKNOWN");
-            break;
-    }
-}
-//--------------------------------------------------------------------------------------------------
+//----Needed here because it's used in ProcessOptions
 int ExpandCoresToUse(char * Request,int * CoresToUse) {
 
     int NumberOfIds;
@@ -180,7 +176,10 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
 
     static struct option LongOptions[] = {
         {"report-cpu-architecture", no_argument,       NULL, 'a'},
-        {"output",                  required_argument, NULL, 'o'},
+        {"watcher-data-file",       required_argument, NULL, 'w'},
+        {"rlr-output-file",         required_argument, NULL, 'w'},
+        {"solver-data-file",        required_argument, NULL, 'o'},
+        {"program-output-file",     required_argument, NULL, 'o'},
         {"timestamp",               no_argument,       NULL, 't'},
         {"verbosity",               required_argument, NULL, 'b'},
         {"cpu-limit",               required_argument, NULL, 'C'},
@@ -203,11 +202,12 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
     Options.TimeStamps = FALSE;
     strcpy(Options.ProgramToControl,"");
     Options.ProgramOutputFile = NULL;
+    Options.RLROutputFile = NULL;
     strcpy(Options.VarFileName,"");
     Options.UseHyperThreading = FALSE;
     Options.ReportCPUArchitecture = FALSE;
 
-    while ((option = getopt_long(argc,argv,"ao:tb:C:W:M:c:yv:?h",LongOptions,
+    while ((option = getopt_long(argc,argv,"aw:o:tb:C:W:M:c:yv:?h",LongOptions,
 &OptionStartIndex)) != -1) {
         switch(option) {
 //---Flag options
@@ -216,9 +216,15 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
             case 'a':
                 Options.ReportCPUArchitecture = TRUE;
                 break;
+            case 'w':
+                if ((Options.RLROutputFile = fopen(optarg,"w")) == NULL) {
+                    MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not open %s for writing\n",optarg);
+                    exit(EXIT_FAILURE);
+                }
+                break;
             case 'o':
                 if ((Options.ProgramOutputFile = fopen(optarg,"w")) == NULL) {
-                    MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for writing\n",optarg);
+                    MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not open %s for writing\n",optarg);
                     exit(EXIT_FAILURE);
                 }
                 break;
@@ -248,11 +254,11 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
                 break;
             case '?':
             case 'h':
-                MyPrintf(Options,VERBOSITY_NONE,"HELP\n");
+                MyPrintf(Options,VERBOSITY_NONE,TRUE,"HELP\n");
                 exit(EXIT_SUCCESS);
                 break;
             default:
-                MyPrintf(Options,VERBOSITY_ERROR,"Invalid option %c\n",option);
+                MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Invalid option %c\n",option);
                 exit(EXIT_FAILURE);
                 break;
         }
@@ -260,12 +266,12 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
 //----The program to control must be next
     if (optind <= argc) {
         strcpy(Options.ProgramToControl,argv[optind++]);
-        MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,
+        MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,
 "CPU limit %d, WC limit %d, RAM limit %d, Program %s\n",Options.CPULimit,
 Options.WCLimit,Options.RAMLimit,Options.ProgramToControl);
     } else {
         if (!Options.ReportCPUArchitecture) {
-            MyPrintf(Options,VERBOSITY_ERROR,"No program to control\n",option);
+            MyPrintf(Options,VERBOSITY_ERROR,TRUE,"No program to control\n",option);
             exit(EXIT_FAILURE);
         }
     }
@@ -277,28 +283,29 @@ void ReportCPUArchitecture(OptionsType Options,CPUArchitectureType CPUArchitectu
 
     int CPUNumber,CoreSibling,ThreadNumber,CoreSiblingsPerCPU;
 
-    MyPrintf(Options,VERBOSITY_NONE,"Number of CPUs:     %2d\n",CPUArchitecture.NumberOfCPUs);
-    MyPrintf(Options,VERBOSITY_NONE,"Number of cores:    %2d\n",CPUArchitecture.NumberOfCores);
-    MyPrintf(Options,VERBOSITY_NONE,"Number of threads:  %2d\n",CPUArchitecture.NumberOfThreads);
+    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Number of CPUs:     %2d\n",CPUArchitecture.NumberOfCPUs);
+    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Number of cores:    %2d\n",CPUArchitecture.NumberOfCores);
+    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Number of threads:  %2d\n",
+CPUArchitecture.NumberOfThreads);
 
     CoreSiblingsPerCPU = 
 CPUArchitecture.NumberOfCores/CPUArchitecture.NumberOfCPUs/CPUArchitecture.NumberOfThreads;
-    MyPrintf(Options,VERBOSITY_NONE,"Core configuration:\n");
+    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Core configuration:\n");
     for (CPUNumber = 0;CPUNumber < CPUArchitecture.NumberOfCPUs;CPUNumber++) {
-        MyPrintf(Options,VERBOSITY_NONE,"    CPU %2d: ",CPUNumber);
+        MyPrintf(Options,VERBOSITY_NONE,TRUE,"    CPU %2d: ",CPUNumber);
         for (CoreSibling = CPUNumber*CoreSiblingsPerCPU;
 CoreSibling < (CPUNumber+1)*CoreSiblingsPerCPU;CoreSibling++) {
             for (ThreadNumber = 0;ThreadNumber < CPUArchitecture.NumberOfThreads; ThreadNumber++) {
-                MyPrintf(Options,VERBOSITY_NONE,"%2d",
+                MyPrintf(Options,VERBOSITY_NONE,TRUE,"%2d",
 CPUArchitecture.CoreAndThreadNumbers[ThreadNumber][CoreSibling]);
                 if (CoreSibling < (CPUNumber+1)*CoreSiblingsPerCPU - 1||
 ThreadNumber < CPUArchitecture.NumberOfThreads - 1) {
-                    MyPrintf(Options,VERBOSITY_NONE,",");
+                    MyPrintf(Options,VERBOSITY_NONE,TRUE,",");
                 }
             }
-            MyPrintf(Options,VERBOSITY_NONE," ");
+            MyPrintf(Options,VERBOSITY_NONE,TRUE," ");
         }
-        MyPrintf(Options,VERBOSITY_NONE,"\n");
+        MyPrintf(Options,VERBOSITY_NONE,TRUE,"\n");
     }
 }
 //--------------------------------------------------------------------------------------------------
@@ -311,11 +318,11 @@ int GetSiblings(OptionsType Options,int CoreNumber,char * SiblingType,int * Sibl
     MySnprintf(FileName,MAX_STRING,"/sys/devices/system/cpu/cpu%d/topology/%s_siblings_list",
 CoreNumber,SiblingType);
     if ((CPUFile = fopen(FileName,"r")) == NULL) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",FileName);
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not open %s for reading\n",FileName);
         exit(EXIT_FAILURE);
     }
     if (fgets(SiblingsLine,MAX_STRING,CPUFile) == NULL) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not read line from %s\n",FileName);
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not read line from %s\n",FileName);
         exit(EXIT_FAILURE);
     }
     fclose(CPUFile);
@@ -336,14 +343,14 @@ CPUArchitectureType GetCPUArchitecture(OptionsType Options) {
     int ThreadSiblingNumber;
 
     if (sched_getaffinity(0,sizeof(cpu_set_t),&AffinityMask) != 0) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not get core numbers\n");
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not get core numbers\n");
         exit(EXIT_FAILURE);
     }
     CPUArchitecture.NumberOfCPUs = 0;
     CPUArchitecture.NumberOfThreads = 0;
     CPUArchitecture.NumberOfCores = CPU_COUNT(&AffinityMask);
     if (CPUArchitecture.NumberOfCores > MAX_CORES) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Number of cores %d exceed maximum %d\n",
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Number of cores %d exceed maximum %d\n",
 CPUArchitecture.NumberOfCores,MAX_CORES);
         exit(EXIT_FAILURE);
     }
@@ -365,8 +372,8 @@ CoreSiblingNumber++) {
 CoreSiblings[CoreSiblingNumber],"thread",ThreadSiblings);
 //DEBUG printf("Core sibling %d has %d thread siblings\n",CoreSiblings[CoreSiblingNumber],CPUArchitecture.NumberOfThreads);
                     if (CPUArchitecture.NumberOfThreads > MAX_THREADS) {
-                        MyPrintf(Options,VERBOSITY_ERROR,"Number of thread %d exceed maximum %d\n",
-CPUArchitecture.NumberOfThreads,MAX_THREADS);
+                        MyPrintf(Options,VERBOSITY_ERROR,TRUE,
+"Number of thread %d exceed maximum %d\n",CPUArchitecture.NumberOfThreads,MAX_THREADS);
                         exit(EXIT_FAILURE);
                     }
                     for (ThreadSiblingNumber = 0;
@@ -398,6 +405,30 @@ void UserInterrupt(int TheSignal) {
     GlobalInterrupted = TRUE;
 }
 //--------------------------------------------------------------------------------------------------
+char * SignalName(int Signal) {
+
+    switch (Signal) {
+        case SIGINT:
+            return("SIGINT");
+            break;
+        case SIGALRM:
+            return("SIGALRM");
+            break;
+        case SIGTERM:
+            return("SIGTERM");
+            break;
+        case SIGXCPU:
+            return("SIGXCPU");
+            break;
+        case SIGKILL:
+            return("SIGKILL");
+            break;
+        default:
+            return("UNKNOWN");
+            break;
+    }
+}
+//--------------------------------------------------------------------------------------------------
 void SetUpSignalHandling(OptionsType Options) {
 
     struct sigaction SignalHandling;
@@ -406,13 +437,13 @@ void SetUpSignalHandling(OptionsType Options) {
     SignalHandling.sa_handler = UserInterrupt;
     SignalHandling.sa_flags = SA_RESTART;
     if (sigaction(SIGINT,&SignalHandling,NULL) != 0) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not wait for ^C signal");
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not wait for ^C signal");
         exit(EXIT_FAILURE);
     }
     SignalHandling.sa_handler = ChildSaysGo;
     SignalHandling.sa_flags = 0;
     if (sigaction(SIGCONT,&SignalHandling,NULL) != 0) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not wait for child signal");
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not wait for child signal");
         exit(EXIT_FAILURE);
     }
 }
@@ -436,16 +467,20 @@ CGroupFileNamesType MakeCGroupFileNames(int ParentPID) {
 //--------------------------------------------------------------------------------------------------
 void MakeCGroupDirectory(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
 
+    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"Make cgroup directory %s\n",
+CGroupFileNames.CGroupDir);
     if (mkdir(CGroupFileNames.CGroupDir,0755) != 0) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not create %s",CGroupFileNames.CGroupDir);
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not create %s",CGroupFileNames.CGroupDir);
         exit(EXIT_FAILURE);
     }
 }
 //--------------------------------------------------------------------------------------------------
 void RemoveCGroupDirectory(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
 
+    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"Remove cgroup directory %s\n",
+CGroupFileNames.CGroupDir);
     if (rmdir(CGroupFileNames.CGroupDir) != 0) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not remove %s",CGroupFileNames.CGroupDir);
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not remove %s",CGroupFileNames.CGroupDir);
         exit(EXIT_FAILURE);
     }
 }
@@ -463,7 +498,7 @@ CGroupFileNamesType CGroupFileNames) {
         for (CoreNumber = 0;CoreNumber < Options.NumberOfCoresToUse;CoreNumber++) {
 //----Check user has not asked for something impossible
             if (Options.CoresToUse[CoreNumber] > CPUArchitecture.NumberOfCores) {
-                MyPrintf(Options,VERBOSITY_ERROR,
+                MyPrintf(Options,VERBOSITY_ERROR,TRUE,
 "Request for core %d, but there are only %d cores\n",Options.CoresToUse[CoreNumber],
 CPUArchitecture.NumberOfCores);
                 exit(EXIT_FAILURE);
@@ -483,15 +518,17 @@ CPUArchitecture.CoreAndThreadNumbers[ThreadNumber][Options.CoresToUse[CoreNumber
                 }
             }
         }
-        MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,"The physical cores to use are %s\n",CoreList);
+        MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,
+"The physical cores to use are %s\n",CoreList);
 
         if ((CPUFile = fopen(CGroupFileNames.CPUSetFile,"w")) == NULL) {
-            MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for writing\n",
+            MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not open %s for writing\n",
 CGroupFileNames.CPUSetFile);
             exit(EXIT_FAILURE);
         }
         if (fputs(CoreList,CPUFile) == EOF) {
-            MyPrintf(Options,VERBOSITY_ERROR,"Could not write to %s\n",CGroupFileNames.CPUSetFile);
+            MyPrintf(Options,VERBOSITY_ERROR,TRUE,
+"Could not write to %s\n",CGroupFileNames.CPUSetFile);
             exit(EXIT_FAILURE);
         }
         fclose(CPUFile);
@@ -504,28 +541,26 @@ int NumberOfProcesses(OptionsType Options,char * CGroupProcsFile,int * PIDsInCGr
     String ShellCommand;
     FILE* ShellFile;
     int NumberOfProccessesInCGroup;
+    String ThePID,TheOutput;
 
     MySnprintf(ShellCommand,MAX_STRING,"cat %s",CGroupProcsFile);
     if ((ShellFile = popen(ShellCommand,"r")) == NULL) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",CGroupProcsFile);
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not open %s for reading\n",CGroupProcsFile);
         exit(EXIT_FAILURE);
     }
     NumberOfProccessesInCGroup = 0;
-    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"The PIDs are now:");
+    strcpy(TheOutput,"The PIDs are now:      ");
     while (NumberOfProccessesInCGroup < MAX_PIDS &&
 fscanf(ShellFile,"%d",&PIDsInCGroup[NumberOfProccessesInCGroup]) != EOF) {
-//----Have to do by hand for pretty output
-        if (Options.Verbosity >= VERBOSITY_RLR_ACTIONS) {
-            printf(" %d",PIDsInCGroup[NumberOfProccessesInCGroup]);
-        }
+        sprintf(ThePID," %d",PIDsInCGroup[NumberOfProccessesInCGroup]);
+        strcat(TheOutput,ThePID);
         NumberOfProccessesInCGroup++;
     }
-    if (Options.Verbosity >= VERBOSITY_RLR_ACTIONS) {
-        printf("\n");
-    }
+    strcat(TheOutput,"\n");
+    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,TheOutput);
     pclose(ShellFile);
     if (NumberOfProccessesInCGroup == MAX_PIDS) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Ran out of PID space when counting NumberOfProcesses\n");
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Ran out of PID space for proccesses cgroup\n");
     }
     return(NumberOfProccessesInCGroup); 
 }
@@ -540,7 +575,7 @@ double RAMUsage(OptionsType Options,char * RAMStatFile,BOOLEAN ReportMax) {
 
     MySnprintf(ShellCommand,MAX_STRING,"cat %s",RAMStatFile);
     if ((ShellFile = popen(ShellCommand,"r")) == NULL) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",RAMStatFile);
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not open %s for reading\n",RAMStatFile);
         exit(EXIT_FAILURE);
     }
     fscanf(ShellFile,"%ld",&Bytes);
@@ -548,7 +583,11 @@ double RAMUsage(OptionsType Options,char * RAMStatFile,BOOLEAN ReportMax) {
     if (Bytes > MaxBytes) {
         MaxBytes = Bytes;
     }
+
 //----Report in MiB
+    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"RAM usage (max) is:   %6.2fMiB (%.2fMiB)\n",
+Bytes/BYTES_PER_MIB,MaxBytes/BYTES_PER_MIB);
+
     if (ReportMax) {
         return(MaxBytes/BYTES_PER_MIB);
     } else {
@@ -568,10 +607,10 @@ double WCUsage(OptionsType Options) {
     Now = TheTime.tv_sec + TheTime.tv_nsec/1000000000.0;
     if (Start < 0.0) {
         Start = Now;
-        MyPrintf(Options,VERBOSITY_ALL,"WC offset is %.2fs\n",Start);
+        MyPrintf(Options,VERBOSITY_ALL,TRUE,"WC offset is:   %12.2fs\n",Start);
     }
     Seconds = Now-Start;
-    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"WCUsage is %.2fs\n",Seconds);
+    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"WC usage is:          %6.2fs\n",Seconds);
     return(Seconds);
 }
 //--------------------------------------------------------------------------------------------------
@@ -599,7 +638,7 @@ burst_usec 0*/
 
     MySnprintf(ShellCommand,MAX_STRING,"cat %s",CPUStatFile);
     if ((ShellFile = popen(ShellCommand,"r")) == NULL) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for reading\n",CPUStatFile);
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not open %s for reading\n",CPUStatFile);
         exit(EXIT_FAILURE);
     }
     fscanf(ShellFile,"usage_usec %ld\n",&MicroSeconds);
@@ -610,12 +649,13 @@ burst_usec 0*/
 
     if (StartMicroSeconds < 0.0) {
         StartMicroSeconds = MicroSeconds;
-        MyPrintf(Options,VERBOSITY_ALL,"CPU offset is %.2fs\n",StartMicroSeconds/1000000.0);
+        MyPrintf(Options,VERBOSITY_ALL,TRUE,"CPU offset is:        %6.2fs\n",
+StartMicroSeconds/1000000.0);
         StartMicroSecondsUser = MicroSecondsUser;
-        MyPrintf(Options,VERBOSITY_ALL,"CPU offset user is %.2fs\n",
+        MyPrintf(Options,VERBOSITY_ALL,TRUE,"CPU offset user is:   %6.2fs\n",
 StartMicroSecondsUser/1000000.0);
         StartMicroSecondsSystem = MicroSecondsSystem;
-        MyPrintf(Options,VERBOSITY_ALL,"CPU offset system is %.2fs\n",
+        MyPrintf(Options,VERBOSITY_ALL,TRUE,"CPU offset system is: %6.2fs\n",
 StartMicroSecondsSystem/1000000.0);
     }
 
@@ -623,13 +663,13 @@ StartMicroSecondsSystem/1000000.0);
     SecondsUser = (MicroSecondsUser-StartMicroSecondsUser)/1000000.0;
     SecondsSystem = (MicroSecondsSystem-StartMicroSecondsSystem)/1000000.0;
 
-    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"CPUUsage is       %.2fs\n",Seconds);
-    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"CPUUsageUser is   %.2fs\n",SecondsUser);
-    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"CPUUsageSystem is %.2fs\n",SecondsSystem);
+    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"CPU usage is:         %6.2fs\n",Seconds);
     if (CPUUsedByUser != NULL) {
+        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"CPU usage user is:    %6.2fs\n",SecondsUser);
         *CPUUsedByUser = SecondsUser;
     }
     if (CPUUsedBySystem != NULL) {
+        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"CPU usage system is:  %6.2fs\n",SecondsSystem);
         *CPUUsedBySystem = SecondsSystem;
     }
     return(Seconds);
@@ -666,7 +706,7 @@ void KillProcesses(OptionsType Options,int NumberOfProccesses,int * PIDs,int Whi
         SentIndex = 0;
         while (SentIndex < MAX_PIDS && SignalsSent[PID_ROW][SentIndex] > 0 &&
 SignalsSent[PID_ROW][SentIndex] != PIDs[PIDsindex]) {
-            MyPrintf(Options,VERBOSITY_ALL,
+            MyPrintf(Options,VERBOSITY_ALL,TRUE,
 "For PID %d already sent SIGXCPU %d and SIGALRM %d and SIGTERM %d and SIGKILL %d\n",
 SignalsSent[PID_ROW][SentIndex],SignalsSent[SIGXCPU_ROW][SentIndex],
 SignalsSent[SIGALRM_ROW][SentIndex],SignalsSent[SIGTERM_ROW][SentIndex],
@@ -685,17 +725,17 @@ SignalsSent[SIGKILL_ROW][SentIndex]);
             SendTheSignal = TRUE;
 //----If have sent a gentle signal before, KILL!
         } else if (! SignalsSent[SIGKILL_ROW][SentIndex]) {
-            MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Upgrading signal from %s to %s\n",
+            MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"Upgrading signal from %s to %s\n",
 SignalName(WhichSignal),SignalName(SIGKILL));
             WhichSignal = SIGKILL;
             SignalsSent[SIGKILL_ROW][SentIndex] = TRUE;
             SendTheSignal = TRUE;
         }
         if (SendTheSignal) {
-            MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Killing PID %d with %s ...\n",
+            MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"Killing PID %d with %s ...\n",
 PIDs[PIDsindex],SignalName(WhichSignal));
             if (kill(PIDs[PIDsindex],WhichSignal) != 0) {
-                MyPrintf(Options,VERBOSITY_ERROR,"Could not kill PID %d with %s\n",
+                MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not kill PID %d with %s\n",
 PIDs[PIDsindex],SignalName(WhichSignal));
             }
         }
@@ -711,10 +751,10 @@ void StartChildProgram(OptionsType Options,char * CGroupProcsFile,int PIDOfRLR) 
     int MyArgC;
 
     ChildPID = getpid();
-    MyPrintf(Options,VERBOSITY_DEBUG,"In CHILD with PID %d\n",ChildPID);
+    MyPrintf(Options,VERBOSITY_DEBUG,TRUE,"In CHILD with PID %d\n",ChildPID);
     MySnprintf(ShellCommand,MAX_STRING,"cat > %s",CGroupProcsFile);
     if ((ShellFile = popen(ShellCommand,"w")) == NULL) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for writing\n",CGroupProcsFile);
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not open %s for writing\n",CGroupProcsFile);
         exit(EXIT_FAILURE);
     }
     fprintf(ShellFile,"%d\n",ChildPID);
@@ -726,22 +766,22 @@ void StartChildProgram(OptionsType Options,char * CGroupProcsFile,int PIDOfRLR) 
         MyArgV[MyArgC] = strtok(NULL," ");
     }
 //----Tell RLR the timing should start
-    MyPrintf(Options,VERBOSITY_DEBUG,
+    MyPrintf(Options,VERBOSITY_DEBUG,TRUE,
 "Child %d tells parent %d and grandparent %d to start monitoring\n",ChildPID,getppid(),PIDOfRLR);
     if (kill(getppid(),SIGCONT) != 0) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not signal parent %d to start timing\n",
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not signal parent %d to start timing\n",
 getppid());
     }
     if (kill(PIDOfRLR,SIGCONT) != 0) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not signal grandparent %d to start timing\n",
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not signal grandparent %d to start timing\n",
 PIDOfRLR);
     }
 
-    MyPrintf(Options,VERBOSITY_DEBUG,"Child %d about to execvp %s\n",ChildPID,
+    MyPrintf(Options,VERBOSITY_DEBUG,TRUE,"Child %d about to execvp %s\n",ChildPID,
 Options.ProgramToControl);
 //----Note all signal handling is reset
     execvp(MyArgV[0],MyArgV);
-    MyPrintf(Options,VERBOSITY_ERROR,"Child %d could not execvp %s\n",ChildPID,
+    MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Child %d could not execvp %s\n",ChildPID,
 Options.ProgramToControl);
     exit(EXIT_FAILURE);
 }
@@ -756,12 +796,12 @@ int PIDOfRLR) {
     String TimeStamp;
 
     if (pipe(Pipe) != 0) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not create pipe to catch child output");
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not create pipe to catch child output");
         exit(EXIT_FAILURE);
     }
 
     if ((ChildPID = fork()) == -1) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not fork() for child program");
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not fork() for child program");
         exit(EXIT_FAILURE);
     }
 
@@ -775,31 +815,31 @@ int PIDOfRLR) {
         strcpy(TimeStamp,"");
         close(Pipe[1]);
         PipeReader = fdopen(Pipe[0],"r");
-        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,
-"Wait for child %d to create and add itself to a cgroup\n",ChildPID);
+        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,
+"Wait for child %d to add itself to the cgroup %s\n",ChildPID,CGroupProcsFile);
         pause();
-        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Child %d has started\n",ChildPID);
+        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"Child %d has started\n",ChildPID);
 //----Start the clocks, hopefully about the same time as the parent - both signalled by job
         CPUUsage(Options,CPUStatFile,NULL,NULL);
         WCUsage(Options);
-        MyPrintf(Options,VERBOSITY_DEBUG,"Start reading from child %d\n",ChildPID);
+        MyPrintf(Options,VERBOSITY_DEBUG,TRUE,"Start reading from child %d\n",ChildPID);
         while (fgets(ChildOutput,MAX_STRING,PipeReader) != NULL) {
             if (Options.TimeStamps) {
 //----Output WC/CPU
                 MySnprintf(TimeStamp,MAX_STRING,"%6.2f/%6.2f\t",WCUsage(Options),
 CPUUsage(Options,CPUStatFile,NULL,NULL));
             }
-            MyPrintf(Options,VERBOSITY_STDOUT_ONLY,"%s%s",TimeStamp,ChildOutput);
+            MyPrintf(Options,VERBOSITY_STDOUT_ONLY,TRUE,"%s%s",TimeStamp,ChildOutput);
             if (Options.ProgramOutputFile != NULL) {
                 fprintf(Options.ProgramOutputFile,"%s%s",TimeStamp,ChildOutput);
             }
         }
-        MyPrintf(Options,VERBOSITY_DEBUG,"Finished reading from child %d\n",ChildPID);
+        MyPrintf(Options,VERBOSITY_DEBUG,TRUE,"Finished reading from child %d\n",ChildPID);
         fclose(PipeReader);
         if (Options.TimeStamps) {
             MySnprintf(TimeStamp,MAX_STRING,"%6.2f/%6.2f\t",WCUsage(Options),
 CPUUsage(Options,CPUStatFile,NULL,NULL));
-            MyPrintf(Options,VERBOSITY_STDOUT_ONLY,"%sEOF\n",TimeStamp);
+            MyPrintf(Options,VERBOSITY_STDOUT_ONLY,TRUE,"%sEOF\n",TimeStamp);
             fflush(stdout);
             if (Options.ProgramOutputFile != NULL) {
                 fprintf(Options.ProgramOutputFile,"%sEOF\n",TimeStamp);
@@ -818,13 +858,14 @@ void ReportResourceUsage(OptionsType Options,CGroupFileNamesType CGroupFileNames
     WCUsed = WCUsage(Options) - WCLost;
     RAMUsed = RAMUsage(Options,CGroupFileNames.RAMStatFile,TRUE);
 
-    MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,"Final CPU usage: %6.2fs\n",CPUUsed);
-    MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,"Final WC  usage: %6.2fs\n",WCUsed);
-    MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,"Final RAM usage: %6.2fMiB\n",RAMUsed);
+    MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,"Final CPU usage: %6.2fs\n",CPUUsed);
+    MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,"Final WC  usage: %6.2fs\n",WCUsed);
+    MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,"Final RAM usage: %6.2fMiB\n",RAMUsed);
 
     if (strlen(Options.VarFileName) > 0) {
         if ((VarFile = fopen(Options.VarFileName,"w")) == NULL) {
-            MyPrintf(Options,VERBOSITY_ERROR,"Could not open %s for writing\n",Options.VarFileName);
+            MyPrintf(Options,VERBOSITY_ERROR,TRUE,
+"Could not open %s for writing\n",Options.VarFileName);
             exit(EXIT_FAILURE);
         }
 
@@ -838,8 +879,8 @@ void ReportResourceUsage(OptionsType Options,CGroupFileNamesType CGroupFileNames
         fprintf(VarFile,"SYSTEMTIME=%.2f\n",CPUUsedBySystem);
         fprintf(VarFile,"# CPUUSAGE: CPUTIME/WCTIME in percent\n");
         fprintf(VarFile,"CPUUSAGE=%.1f\n",100.0*CPUUsed/(WCUsed != 0 ? WCUsed : 1));
-        // fprintf(VarFile,"# MAXVM: maximum virtual memory used in KiB\n");
-        // fprintf(VarFile,"MAXVM=" << maxVSize << endl;
+        fprintf(VarFile,"# MAXVM: maximum virtual memory used in MiB\n");
+        fprintf(VarFile,"MAXVM=%.2f\n",RAMUsed);
 
         fclose(VarFile);
     }
@@ -849,7 +890,6 @@ void MonitorDescendantProcesses(OptionsType Options,CGroupFileNamesType CGroupFi
 
     int NumberOfProccessesInCGroup;
     BOOLEAN DoneSomeKilling;
-    int ReapedPID;
     int PIDsInCGroup[MAX_PIDS];
     double CPUUsed, WCUsed, RAMUsed;
     double LastCPUUsed, LastWCUsed;
@@ -865,7 +905,7 @@ void MonitorDescendantProcesses(OptionsType Options,CGroupFileNamesType CGroupFi
     NumberOfProccessesInCGroup = NumberOfProcesses(Options,CGroupFileNames.CGroupProcsFile,
 PIDsInCGroup);
     while (NumberOfProccessesInCGroup > 0) {
-        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Number of processes is: %d\n",
+        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"Number of processes is: %d\n",
 NumberOfProccessesInCGroup);
         DoneSomeKilling = FALSE;
 //----Always get resource usages for reporting, even if not limiting
@@ -888,11 +928,11 @@ NumberOfProccessesInCGroup);
             KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGINT);
             DoneSomeKilling = TRUE;
         }
-        if (CPUUsed - LastCPUUsed > MINIMUM_CPU_USAGE_BETWEEN_RESOURCE_REPORTS |
-WCUsed - LastWCUsed > MINIMUM_WC_USAGE_BETWEEN_RESOURCE_REPORTS) {
+        if ((CPUUsed - LastCPUUsed > MINIMUM_CPU_USAGE_BETWEEN_RESOURCE_REPORTS) |
+(WCUsed - LastWCUsed > MINIMUM_WC_USAGE_BETWEEN_RESOURCE_REPORTS)) {
             LastCPUUsed = CPUUsed;
             LastWCUsed = WCUsed;
-            MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,"CPU: %.2fs WC: %.2fs RAM: %.2fMiB\n",
+            MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,"CPU: %.2fs WC: %.2fs RAM: %.2fMiB\n",
 CPUUsed,WCUsed,RAMUsed);
         }
         nanosleep(&SleepRequired,NULL);
@@ -900,17 +940,17 @@ CPUUsed,WCUsed,RAMUsed);
 //----Reap zombies
 //        if (DoneSomeKilling) {
 //            while ((ReapedPID = waitpid(-1,NULL,WNOHANG)) > 0) {
-//                MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Reaped killed or exited process %d\n",
-//ReapedPID);
+//                MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,
+//"Reaped killed or exited process %d\n",ReapedPID);
 //            }
 //        }
         NumberOfProccessesInCGroup = NumberOfProcesses(Options,CGroupFileNames.CGroupProcsFile,
 PIDsInCGroup);
     }
-    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"No processes left\n");
+    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"No processes left\n");
 //----Reap zombie child (should not exist)
 //    while ((ReapedPID = waitpid(-1,NULL,WNOHANG)) > 0) {
-//        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Reaped exited process %d\n",ReapedPID);
+//        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"Reaped exited process %d\n",ReapedPID);
 //    }
 
 //----Final report, including VarFile
@@ -944,7 +984,7 @@ int main(int argc, char* argv[]) {
     LimitCores(Options,CPUArchitecture,CGroupFileNames);
 
     if ((ChildPID = fork()) == -1) {
-        MyPrintf(Options,VERBOSITY_ERROR,"Could not fork() for child processing");
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not fork() for child processing");
         exit(EXIT_FAILURE);
     }
 
@@ -953,11 +993,11 @@ int main(int argc, char* argv[]) {
 ParentPID);
         exit(EXIT_SUCCESS);
     } else {
-        MyPrintf(Options,VERBOSITY_DEBUG,"In RLR with PID %d\n",ParentPID);
-        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,
-"Wait for child of %d to create and add itself to a cgroup\n",ChildPID);
+        MyPrintf(Options,VERBOSITY_DEBUG,TRUE,"In RLR with PID %d\n",ParentPID);
+        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,
+"Wait for child of %d to add itself to the cgroup %s\n",ChildPID,CGroupFileNames.CGroupProcsFile);
         pause();
-        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,"Child of %d has started\n",ChildPID);
+        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"Child of %d has started\n",ChildPID);
 //----Start the clocks
         CPUUsage(Options,CGroupFileNames.CPUStatFile,NULL,NULL);
         WCUsage(Options);
@@ -968,6 +1008,10 @@ ParentPID);
         fclose(Options.ProgramOutputFile);
     }
     RemoveCGroupDirectory(Options,CGroupFileNames);
+
+    if (Options.RLROutputFile != NULL) {
+        fclose(Options.RLROutputFile);
+    }
 
     return(EXIT_SUCCESS);
 }

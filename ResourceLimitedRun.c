@@ -402,17 +402,6 @@ ThreadSiblingNumber < CPUArchitecture.NumberOfThreads;ThreadSiblingNumber++) {
     return(CPUArchitecture);
 }
 //--------------------------------------------------------------------------------------------------
-void ChildSaysGo(int TheSignal) {
-
-    //printf("Child told parent to start monitoring\n");
-}
-//--------------------------------------------------------------------------------------------------
-void UserInterrupt(int TheSignal) {
-
-//DEBUG printf("User did ^C to %d\n",getpid());
-    GlobalInterrupted = TRUE;
-}
-//--------------------------------------------------------------------------------------------------
 char * SignalName(int Signal) {
 
     switch (Signal) {
@@ -428,8 +417,8 @@ char * SignalName(int Signal) {
         case SIGXCPU:
             return("SIGXCPU");
             break;
-        case SIGSTOP:
-            return("SIGSTOP");
+        case SIGUSR1:
+            return("SIGUSR1");
             break;
         case SIGKILL:
             return("SIGKILL");
@@ -438,6 +427,23 @@ char * SignalName(int Signal) {
             return("UNKNOWN");
             break;
     }
+}
+//--------------------------------------------------------------------------------------------------
+void ExitHandler(int TheSignal) {
+
+    exit(EXIT_FAILURE);
+    //printf("Child told parent to start monitoring\n");
+}
+//--------------------------------------------------------------------------------------------------
+void ChildSaysGo(int TheSignal) {
+
+    //printf("Child told parent to start monitoring\n");
+}
+//--------------------------------------------------------------------------------------------------
+void UserInterrupt(int TheSignal) {
+
+//DEBUG printf("User did ^C to %d\n",getpid());
+    GlobalInterrupted = TRUE;
 }
 //--------------------------------------------------------------------------------------------------
 void SetUpSignalHandling(OptionsType Options) {
@@ -686,7 +692,7 @@ StartMicroSecondsSystem/1000000.0);
     return(Seconds);
 }
 //--------------------------------------------------------------------------------------------------
-void KillProcesses(OptionsType Options,int NumberOfProccesses,int * PIDs,int WhichSignal,
+void KillProcesses(OptionsType Options,int NumberOfProccesses,int * PIDsToKill,int WhichSignal,
 double WCUsed) {
 
 #define PID_ROW 0
@@ -694,7 +700,7 @@ double WCUsed) {
 #define SIGALRM_ROW 2
 #define SIGTERM_ROW 3
 #define SIGINT_ROW 4
-#define SIGSTOP_ROW 5
+#define SIGUSR1_ROW 5
 #define SIGKILL_ROW 6
     static int SignalsSent[SIGKILL_ROW+1][MAX_PIDS]; 
     int PIDsindex;
@@ -711,8 +717,8 @@ double WCUsed) {
         SignalsSentRow = SIGTERM_ROW;
     } else if (WhichSignal == SIGINT) {
         SignalsSentRow = SIGINT_ROW;
-    } else if (WhichSignal == SIGSTOP) {
-        SignalsSentRow = SIGSTOP_ROW;
+    } else if (WhichSignal == SIGUSR1) {
+        SignalsSentRow = SIGUSR1_ROW;
     } else {
         SignalsSentRow = SIGKILL_ROW;
     }
@@ -722,18 +728,18 @@ double WCUsed) {
         SentIndex = 0;
         SignalToSend = WhichSignal;
         while (SentIndex < MAX_PIDS && SignalsSent[PID_ROW][SentIndex] > 0 &&
-SignalsSent[PID_ROW][SentIndex] != PIDs[PIDsindex]) {
-            MyPrintf(Options,VERBOSITY_ALL,TRUE,
-"For PID %d already sent SIGXCPU %d and SIGALRM %d and SIGTERM %d and SIGSTOP %d and SIGKILL %d\n",
+SignalsSent[PID_ROW][SentIndex] != PIDsToKill[PIDsindex]) {
+            MyPrintf(Options,VERBOSITY_DEBUG,TRUE,
+"For PID %d already sent SIGXCPU %d and SIGALRM %d and SIGTERM %d and SIGUSR1 %d and SIGKILL %d\n",
 SignalsSent[PID_ROW][SentIndex],SignalsSent[SIGXCPU_ROW][SentIndex],
 SignalsSent[SIGALRM_ROW][SentIndex],SignalsSent[SIGTERM_ROW][SentIndex],
-SignalsSent[SIGSTOP_ROW][SentIndex],SignalsSent[SIGKILL_ROW][SentIndex]);
+SignalsSent[SIGUSR1_ROW][SentIndex],SignalsSent[SIGKILL_ROW][SentIndex]);
             SentIndex++;
         }
         SendTheSignal = FALSE;
 //----If PID has never been sent a signal, add a column for it
         if (SignalsSent[PID_ROW][SentIndex] == 0) {
-            SignalsSent[PID_ROW][SentIndex] = PIDs[PIDsindex];
+            SignalsSent[PID_ROW][SentIndex] = PIDsToKill[PIDsindex];
             SendTheSignal = TRUE;
         }
 //----If have not sent a gentle signal yet, do it
@@ -758,10 +764,10 @@ SignalName(WhichSignal),SignalName(SIGKILL));
         }
         if (SendTheSignal) {
             MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"Killing PID %d with %s ...\n",
-PIDs[PIDsindex],SignalName(WhichSignal));
-            if (kill(PIDs[PIDsindex],SignalToSend) != 0) {
+PIDsToKill[PIDsindex],SignalName(WhichSignal));
+            if (kill(PIDsToKill[PIDsindex],SignalToSend) != 0) {
                 MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not kill PID %d with %s\n",
-PIDs[PIDsindex],SignalName(SignalToSend));
+PIDsToKill[PIDsindex],SignalName(SignalToSend));
             }
         }
     }
@@ -821,9 +827,14 @@ int PIDOfRLR) {
     String ChildOutput;
     String TimeStamp;
 
-//----Ignore user interrupts, let RLR kill the cgroup so this ends naturally
+//----Ignore user interrupts, let RLR kill the cgroup with SIGUSR1 so this ends naturally
     SignalHandling.sa_handler = SIG_IGN;
     if (sigaction(SIGINT,&SignalHandling,NULL) != 0) {
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not ignore ^C signal");
+        exit(EXIT_FAILURE);
+    }
+    SignalHandling.sa_handler = ExitHandler;
+    if (sigaction(SIGUSR1,&SignalHandling,NULL) != 0) {
         MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not ignore ^C signal");
         exit(EXIT_FAILURE);
     }
@@ -962,7 +973,7 @@ NumberOfProccessesInCGroup);
         }
         if (GlobalInterrupted) {
             MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"User interrupt, killing processes\n");
-            KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGSTOP,WCUsed);
+            KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGUSR1,WCUsed);
             DoneSomeKilling = TRUE;
         }
         if ((CPUUsed - LastCPUUsed > MINIMUM_CPU_USAGE_BETWEEN_RESOURCE_REPORTS) |

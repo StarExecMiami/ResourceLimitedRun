@@ -2,6 +2,7 @@
 
 #include <getopt.h>
 #include <string.h>
+#include <math.h>
 #include <signal.h>
 #include <limits.h>
 #include <sys/resource.h>
@@ -34,6 +35,7 @@
 #define NANO_SECONDS_BETWEEN_RESOURCE_MONITORING 100000000
 #define MINIMUM_CPU_USAGE_BETWEEN_RESOURCE_REPORTS 1.0
 #define MINIMUM_WC_USAGE_BETWEEN_RESOURCE_REPORTS 1.0
+#define DEFAULT_DELAY_BEFORE_KILL 1.0
 
 #define MAX_ARGS 256
 #define MAX_STRING 1024
@@ -55,6 +57,7 @@ typedef struct {
     String ProgramToControl;
     FILE* ProgramOutputFile;
     FILE* RLROutputFile;
+    double DelayBeforeKill;
     String VarFileName;
     BOOLEAN UseHyperThreading;
     BOOLEAN ReportCPUArchitecture;
@@ -185,6 +188,7 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
         {"cpu-limit",               required_argument, NULL, 'C'},
         {"wall-clock-limit",        required_argument, NULL, 'W'},
         {"mem-soft-limit",          required_argument, NULL, 'M'},
+        {"delay",                   required_argument, NULL, 'd'},
         {"cores",                   required_argument, NULL, 'c'},
         {"use-hyperthreading",      no_argument,       NULL, 'y'},
         {"var",                     required_argument, NULL, 'v'},
@@ -198,6 +202,7 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
     Options.CPULimit = -1;
     Options.WCLimit = -1;
     Options.RAMLimit = -1;
+    Options.DelayBeforeKill = DEFAULT_DELAY_BEFORE_KILL;
     Options.NumberOfCoresToUse = 0;
     Options.TimeStamps = FALSE;
     strcpy(Options.ProgramToControl,"");
@@ -207,7 +212,7 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
     Options.UseHyperThreading = FALSE;
     Options.ReportCPUArchitecture = FALSE;
 
-    while ((option = getopt_long(argc,argv,"aw:o:tb:C:W:M:c:yv:?h",LongOptions,
+    while ((option = getopt_long(argc,argv,"aw:o:tb:C:W:M:d:c:yv:?h",LongOptions,
 &OptionStartIndex)) != -1) {
         switch(option) {
 //---Flag options
@@ -242,6 +247,9 @@ OptionsType ProcessOptions(int argc, char* argv[]) {
                 break;
             case 'M':
                 Options.RAMLimit= atoi(optarg);
+                break;
+            case 'd':
+                Options.DelayBeforeKill= atof(optarg);
                 break;
             case 'c':
                 Options.NumberOfCoresToUse = ExpandCoresToUse(optarg,Options.CoresToUse);
@@ -419,6 +427,9 @@ char * SignalName(int Signal) {
             break;
         case SIGXCPU:
             return("SIGXCPU");
+            break;
+        case SIGSTOP:
+            return("SIGSTOP");
             break;
         case SIGKILL:
             return("SIGKILL");
@@ -675,19 +686,22 @@ StartMicroSecondsSystem/1000000.0);
     return(Seconds);
 }
 //--------------------------------------------------------------------------------------------------
-void KillProcesses(OptionsType Options,int NumberOfProccesses,int * PIDs,int WhichSignal) {
+void KillProcesses(OptionsType Options,int NumberOfProccesses,int * PIDs,int WhichSignal,
+double WCUsed) {
 
 #define PID_ROW 0
 #define SIGXCPU_ROW 1
 #define SIGALRM_ROW 2
 #define SIGTERM_ROW 3
 #define SIGINT_ROW 4
-#define SIGKILL_ROW 5
+#define SIGSTOP_ROW 5
+#define SIGKILL_ROW 6
     static int SignalsSent[SIGKILL_ROW+1][MAX_PIDS]; 
     int PIDsindex;
     int SignalsSentRow;
     int SentIndex;
     BOOLEAN SendTheSignal;
+    int SignalToSend;
 
     if (WhichSignal == SIGXCPU) {
         SignalsSentRow = SIGXCPU_ROW;
@@ -697,6 +711,8 @@ void KillProcesses(OptionsType Options,int NumberOfProccesses,int * PIDs,int Whi
         SignalsSentRow = SIGTERM_ROW;
     } else if (WhichSignal == SIGINT) {
         SignalsSentRow = SIGINT_ROW;
+    } else if (WhichSignal == SIGSTOP) {
+        SignalsSentRow = SIGSTOP_ROW;
     } else {
         SignalsSentRow = SIGKILL_ROW;
     }
@@ -704,13 +720,14 @@ void KillProcesses(OptionsType Options,int NumberOfProccesses,int * PIDs,int Whi
     for (PIDsindex = 0; PIDsindex < NumberOfProccesses; PIDsindex++) {
 //----See what we have sent before to this PID
         SentIndex = 0;
+        SignalToSend = WhichSignal;
         while (SentIndex < MAX_PIDS && SignalsSent[PID_ROW][SentIndex] > 0 &&
 SignalsSent[PID_ROW][SentIndex] != PIDs[PIDsindex]) {
             MyPrintf(Options,VERBOSITY_ALL,TRUE,
-"For PID %d already sent SIGXCPU %d and SIGALRM %d and SIGTERM %d and SIGKILL %d\n",
+"For PID %d already sent SIGXCPU %d and SIGALRM %d and SIGTERM %d and SIGSTOP %d and SIGKILL %d\n",
 SignalsSent[PID_ROW][SentIndex],SignalsSent[SIGXCPU_ROW][SentIndex],
 SignalsSent[SIGALRM_ROW][SentIndex],SignalsSent[SIGTERM_ROW][SentIndex],
-SignalsSent[SIGKILL_ROW][SentIndex]);
+SignalsSent[SIGSTOP_ROW][SentIndex],SignalsSent[SIGKILL_ROW][SentIndex]);
             SentIndex++;
         }
         SendTheSignal = FALSE;
@@ -720,23 +737,31 @@ SignalsSent[SIGKILL_ROW][SentIndex]);
             SendTheSignal = TRUE;
         }
 //----If have not sent a gentle signal yet, do it
-        if (! SignalsSent[SignalsSentRow][SentIndex]) {
-            SignalsSent[SignalsSentRow][SentIndex] = TRUE;
+        if (SignalsSent[SignalsSentRow][SentIndex] == 0) {
+            if ((int)WCUsed == 0) {
+                SignalsSent[SignalsSentRow][SentIndex] = 1;
+            } else {
+                SignalsSent[SignalsSentRow][SentIndex] = (int)WCUsed;
+            }
             SendTheSignal = TRUE;
 //----If have sent a gentle signal before, KILL!
-        } else if (! SignalsSent[SIGKILL_ROW][SentIndex]) {
-            MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"Upgrading signal from %s to %s\n",
+        } else {
+//DEBUG printf("Sent SignalName(WhichSignal) %.2fs ago\n",WCUsed - SignalsSent[SignalsSentRow][SentIndex]);
+            if (! SignalsSent[SIGKILL_ROW][SentIndex] && 
+(WCUsed - SignalsSent[SignalsSentRow][SentIndex] >= Options.DelayBeforeKill)) {
+                MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"Upgrading signal from %s to %s\n",
 SignalName(WhichSignal),SignalName(SIGKILL));
-            WhichSignal = SIGKILL;
-            SignalsSent[SIGKILL_ROW][SentIndex] = TRUE;
-            SendTheSignal = TRUE;
+                SignalToSend = SIGKILL;
+                SignalsSent[SIGKILL_ROW][SentIndex] = TRUE;
+                SendTheSignal = TRUE;
+            }
         }
         if (SendTheSignal) {
             MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"Killing PID %d with %s ...\n",
 PIDs[PIDsindex],SignalName(WhichSignal));
-            if (kill(PIDs[PIDsindex],WhichSignal) != 0) {
+            if (kill(PIDs[PIDsindex],SignalToSend) != 0) {
                 MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not kill PID %d with %s\n",
-PIDs[PIDsindex],SignalName(WhichSignal));
+PIDs[PIDsindex],SignalName(SignalToSend));
             }
         }
     }
@@ -789,11 +814,19 @@ Options.ProgramToControl);
 void StartChildProcessing(OptionsType Options,char * CGroupProcsFile,char * CPUStatFile,
 int PIDOfRLR) {
 
+    struct sigaction SignalHandling;
     int ChildPID;
     int Pipe[2];
     FILE* PipeReader;
     String ChildOutput;
     String TimeStamp;
+
+//----Ignore user interrupts, let RLR kill the cgroup so this ends naturally
+    SignalHandling.sa_handler = SIG_IGN;
+    if (sigaction(SIGINT,&SignalHandling,NULL) != 0) {
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not ignore ^C signal");
+        exit(EXIT_FAILURE);
+    }
 
     if (pipe(Pipe) != 0) {
         MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not create pipe to catch child output");
@@ -913,19 +946,23 @@ NumberOfProccessesInCGroup);
         WCUsed = WCUsage(Options);
         RAMUsed = RAMUsage(Options,CGroupFileNames.RAMStatFile,FALSE);
         if (Options.CPULimit > 0 && CPUUsed > Options.CPULimit) {
-            KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGXCPU);
+            MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"CPU limit reached, killing processes\n");
+            KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGXCPU,WCUsed);
             DoneSomeKilling = TRUE;
         }
         if (Options.WCLimit > 0 && WCUsed > Options.WCLimit) {
-            KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGALRM);
+            MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"WC limit reached, killing processes\n");
+            KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGALRM,WCUsed);
             DoneSomeKilling = TRUE;
         }
         if (Options.RAMLimit > 0 && RAMUsed > Options.RAMLimit) {
-            KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGTERM);
+            MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"RAM limit reached, killing processes\n");
+            KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGTERM,WCUsed);
             DoneSomeKilling = TRUE;
         }
         if (GlobalInterrupted) {
-            KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGINT);
+            MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"User interrupt, killing processes\n");
+            KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGSTOP,WCUsed);
             DoneSomeKilling = TRUE;
         }
         if ((CPUUsed - LastCPUUsed > MINIMUM_CPU_USAGE_BETWEEN_RESOURCE_REPORTS) |

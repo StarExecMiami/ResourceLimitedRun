@@ -1,0 +1,30 @@
+#!/bin/tcsh
+
+#----Run this under sudo to get everything set up. The single optional argument is the "user name"
+#----for the cgroup directory under which the cgroup for the programs that run are greated, using
+#----PIDs to keep them separated.
+
+if (THERE are TWO ARGS) then
+    set CGroupUserName = THE ARG
+    set CGroupGroupName = THE NEXT ARG
+else
+    set CGroupUserName = $USER
+    set CGroupGroupName = $GROUP
+endif
+
+cd /sys/fs/cgroup/
+#----These all need sudo
+#----The top level cgroup.procs needs to be writable because the PIDs put in the lower cgroups
+#----get propagated upwards
+chmod 666 cgroup.procs
+
+#----This needs sudo
+mkdir $CGroupUserName
+#----This needs sudo
+chown -R $CGroupUserName:$CGroupGroupName $CGroupUserName
+cd $CGroupUserName
+echo "+cpu +cpuset" | sudo tee cgroup.subtree_control    # Also puts cpu in tptp/cgroup.subtree_control
+echo "+memory +cpu + cupset" >> cgroup.subtree_control   # NEED TO MAKE THIS DEFAULT
+#----Make tptp own the new stuff
+chown $CGroupUserName:$CGroupGroupName *   
+

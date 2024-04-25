@@ -56,6 +56,7 @@ typedef struct {
     int CPULimit;
     int WCLimit;
     int RAMLimit;
+    BOOLEAN PhysicalCoreList;
     int CoresToUse[MAX_CORES];
     int NumberOfCoresToUse;
     BOOLEAN UseHyperThreading;
@@ -153,6 +154,57 @@ void MySnprintf(char * PrintIntoHere,int LengthOfHere,char * Format,...) {
     va_end(ThingsToPrint);
 }
 //--------------------------------------------------------------------------------------------------
+void PrintExplanationOfRLR() {
+
+    printf("\
+ResourceLimitedRun (RLR) monitors the CPU, WC, and memory usage of processes that are \n\
+started from running a supplied program with its arguments. \n\
++ The RLR process creates a cgroup named after its PID. \n\
++ The RLR process then starts a process that collects the stdout and stderr of the supplied \n\
+  program and any processes it starts. \n\
+  - The output monitor process echos the output with a timestamp if requested. \n\
+  - The output monitor process starts a third process to execute the supplied program. \n\
++ The program execution process puts itself into the cgroup, then execs the supplied program. \n\
+  - All processes that start as a result of running the supplied program are automatically \n\
+    added to the cgroup. \n\
++ RLR regularly gets the CPU, WC, and memory usage of the cgroup from the cgroup files. \n\
+  - If any exceed the specified limit, RLR signals the processes in the cgroup to stop. \n\
+  - The first signal is gentle - SIXCPU or SIGALRM or SIGTERM. \n\
+  - If the processes persist they are killed with SIGKILL. \n\
++ The CPU cores to use can be limited.\n");
+
+}
+//--------------------------------------------------------------------------------------------------
+void ReportCPUArchitecture(OptionsType Options,CPUArchitectureType CPUArchitecture) {
+
+    int CPUNumber,CoreSibling,ThreadNumber,CoreSiblingsPerCPU;
+
+    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Number of CPUs:     %2d\n",CPUArchitecture.NumberOfCPUs);
+    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Number of cores:    %2d\n",CPUArchitecture.NumberOfCores);
+    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Number of threads:  %2d\n",
+CPUArchitecture.NumberOfThreads);
+
+    CoreSiblingsPerCPU = 
+CPUArchitecture.NumberOfCores/CPUArchitecture.NumberOfCPUs/CPUArchitecture.NumberOfThreads;
+    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Core configuration:\n");
+    for (CPUNumber = 0;CPUNumber < CPUArchitecture.NumberOfCPUs;CPUNumber++) {
+        MyPrintf(Options,VERBOSITY_NONE,TRUE,"    CPU %2d: ",CPUNumber);
+        for (CoreSibling = CPUNumber*CoreSiblingsPerCPU;
+CoreSibling < (CPUNumber+1)*CoreSiblingsPerCPU;CoreSibling++) {
+            for (ThreadNumber = 0;ThreadNumber < CPUArchitecture.NumberOfThreads; ThreadNumber++) {
+                MyPrintf(Options,VERBOSITY_NONE,TRUE,"%2d",
+CPUArchitecture.CoreAndThreadNumbers[ThreadNumber][CoreSibling]);
+                if (CoreSibling < (CPUNumber+1)*CoreSiblingsPerCPU - 1||
+ThreadNumber < CPUArchitecture.NumberOfThreads - 1) {
+                    MyPrintf(Options,VERBOSITY_NONE,TRUE,",");
+                }
+            }
+            MyPrintf(Options,VERBOSITY_NONE,TRUE," ");
+        }
+        MyPrintf(Options,VERBOSITY_NONE,TRUE,"\n");
+    }
+}
+//--------------------------------------------------------------------------------------------------
 char * CoresToUseAsString(OptionsType Options,CPUArchitectureType CPUArchitecture,
 char * CoreList) {
 
@@ -211,44 +263,6 @@ int ExpandCoresToUse(char * Request,int * CoresToUse) {
     return(NumberOfIds);
 }
 //--------------------------------------------------------------------------------------------------
-void PrintExplanationOfRLR() {
-
-    printf("line \n \
-and \n \
-another\n");
-
-}
-//--------------------------------------------------------------------------------------------------
-void ReportCPUArchitecture(OptionsType Options,CPUArchitectureType CPUArchitecture) {
-
-    int CPUNumber,CoreSibling,ThreadNumber,CoreSiblingsPerCPU;
-
-    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Number of CPUs:     %2d\n",CPUArchitecture.NumberOfCPUs);
-    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Number of cores:    %2d\n",CPUArchitecture.NumberOfCores);
-    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Number of threads:  %2d\n",
-CPUArchitecture.NumberOfThreads);
-
-    CoreSiblingsPerCPU = 
-CPUArchitecture.NumberOfCores/CPUArchitecture.NumberOfCPUs/CPUArchitecture.NumberOfThreads;
-    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Core configuration:\n");
-    for (CPUNumber = 0;CPUNumber < CPUArchitecture.NumberOfCPUs;CPUNumber++) {
-        MyPrintf(Options,VERBOSITY_NONE,TRUE,"    CPU %2d: ",CPUNumber);
-        for (CoreSibling = CPUNumber*CoreSiblingsPerCPU;
-CoreSibling < (CPUNumber+1)*CoreSiblingsPerCPU;CoreSibling++) {
-            for (ThreadNumber = 0;ThreadNumber < CPUArchitecture.NumberOfThreads; ThreadNumber++) {
-                MyPrintf(Options,VERBOSITY_NONE,TRUE,"%2d",
-CPUArchitecture.CoreAndThreadNumbers[ThreadNumber][CoreSibling]);
-                if (CoreSibling < (CPUNumber+1)*CoreSiblingsPerCPU - 1||
-ThreadNumber < CPUArchitecture.NumberOfThreads - 1) {
-                    MyPrintf(Options,VERBOSITY_NONE,TRUE,",");
-                }
-            }
-            MyPrintf(Options,VERBOSITY_NONE,TRUE," ");
-        }
-        MyPrintf(Options,VERBOSITY_NONE,TRUE,"\n");
-    }
-}
-//--------------------------------------------------------------------------------------------------
 char * GenerateHelpLine(OptionsType Options,CPUArchitectureType CPUArchitecture,char Option,
 char * HelpLine) {
 
@@ -285,8 +299,13 @@ Options.WCLimit);
             MySnprintf(HelpLine,MAX_STRING,"Memory limit, in MiB.\n    Value: %.2fMiB",
 Options.RAMLimit);
             break;
+        case 'p':
+            MySnprintf(HelpLine,MAX_STRING,"Core list is physical (not indexed).\n    Value: %s",
+BOOLEAN_TO_STRING(Options.PhysicalCoreList));
+            break;
         case 'c':
-            MySnprintf(HelpLine,MAX_STRING,"Cores to use.\n    Value: All (%s)",
+            MySnprintf(HelpLine,MAX_STRING,"Cores to use.\n    Value: %s",
+ZZZZZZZZZZZZZ
 CoresToUseAsString(Options,CPUArchitecture,TheString));
             break;
         case 'y':
@@ -381,6 +400,7 @@ OptionsType InitializeOptions() {
     Options.CPULimit = -1;
     Options.WCLimit = -1;
     Options.RAMLimit = -1;
+    Options.PhysicalCoreList = FALSE;
     Options.NumberOfCoresToUse = 0;
     Options.UseHyperThreading = FALSE;
     Options.WCDelayBeforeKill = DEFAULT_WC_DELAY_BEFORE_KILL;
@@ -411,6 +431,7 @@ char* argv[]) {
         {"wall-clock-limit",        required_argument, NULL, 'W'},
         {"mem-soft-limit",          required_argument, NULL, 'M'},
         {"memory-limit",            required_argument, NULL, 'M'},
+        {"physical_cores",          required_argument, NULL, 'p'},
         {"cores",                   required_argument, NULL, 'c'},
         {"use-hyperthreading",      no_argument,       NULL, 'y'},
         {"resource-monitor-delay",  required_argument, NULL, 'm'},
@@ -429,7 +450,7 @@ char* argv[]) {
     };
 
     OptionStartIndex = 0;
-    while ((Option = getopt_long(argc,argv,"u:b:OAC:W:M:c:ym:r:d:to:w:v:xh",LongOptions,
+    while ((Option = getopt_long(argc,argv,"u:b:OAC:W:M:p:c:ym:r:d:to:w:v:xh",LongOptions,
 &OptionStartIndex)) != -1) {
         switch(Option) {
 //---Flag options
@@ -457,6 +478,8 @@ char* argv[]) {
             case 'M':
                 Options.RAMLimit= atoi(optarg);
                 break;
+            case 'p':
+                Options.PhysicalCoreList = TRUE;
             case 'c':
                 Options.NumberOfCoresToUse = ExpandCoresToUse(optarg,Options.CoresToUse);
                 break;
@@ -495,6 +518,9 @@ Options.RLROutputFileName);
                 break;
             case 'x':
                 PrintExplanationOfRLR();
+                CleanUp(Options,NULL);
+                exit(EXIT_SUCCESS);
+                break;
             case '?':  //----What optargs returns for invalid options
             case 'h':
                 PrintHelp(Options,CPUArchitecture,LongOptions);
@@ -744,10 +770,14 @@ CPUArchitecture.NumberOfCores);
             if (CoreNumber > 0) {
                 strcat(CoreList,",");
             }
-            sprintf(CommaCore,"%d",
+            sprintf(CommaCore,"%d", Options.PhysicalCoreList ? 
+//----For physical cores use directly
+Options.CoresToUse[CoreNumber] :
+//----For indexed cores look up the physical core number
 CPUArchitecture.CoreAndThreadNumbers[0][Options.CoresToUse[CoreNumber]]);
             strcat(CoreList,CommaCore);
-            if (Options.UseHyperThreading) {
+//----For indexed cores I have to add the hyperthreaded cores
+            if (! Options.PhysicalCoreList && Options.UseHyperThreading) {
                 for (ThreadNumber = 1;ThreadNumber < CPUArchitecture.NumberOfThreads;
 ThreadNumber++) {
                     sprintf(CommaCore,",%d",
@@ -756,16 +786,17 @@ CPUArchitecture.CoreAndThreadNumbers[ThreadNumber][Options.CoresToUse[CoreNumber
                 }
             }
         }
-        MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,
-"The physical cores to use are %s\n",CoreList);
+//----Limit cores in cgroup
+        MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,"The physical cores to use are %s\n",
+CoreList);
 
         if ((CPUFile = fopen(CGroupFileNames.CPUSetFile,"w")) == NULL) {
             MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not open %s for writing\n",
 CGroupFileNames.CPUSetFile);
         }
         if (fputs(CoreList,CPUFile) == EOF) {
-            MyPrintf(Options,VERBOSITY_ERROR,TRUE,
-"Could not write to %s\n",CGroupFileNames.CPUSetFile);
+            MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not write to %s\n",
+CGroupFileNames.CPUSetFile);
         }
         fclose(CPUFile);
     }

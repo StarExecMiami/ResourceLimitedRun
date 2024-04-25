@@ -51,6 +51,7 @@ typedef char String[MAX_STRING];
 typedef struct {
     String CGroupUser;
     int Verbosity;
+    BOOLEAN ReportOptions;
     BOOLEAN ReportCPUArchitecture;
     int CPULimit;
     int WCLimit;
@@ -152,6 +153,30 @@ void MySnprintf(char * PrintIntoHere,int LengthOfHere,char * Format,...) {
     va_end(ThingsToPrint);
 }
 //--------------------------------------------------------------------------------------------------
+char * CoresToUseAsString(OptionsType Options,CPUArchitectureType CPUArchitecture,
+char * CoreList) {
+
+    int CoreNumber,ThreadNumber;
+    String CommaCore;
+
+    strcpy(CoreList,"");
+    for (CoreNumber=0; CoreNumber < CPUArchitecture.NumberOfCores; CoreNumber++) {
+        if (CoreNumber > 0) {
+            strcat(CoreList,",");
+        }
+        sprintf(CommaCore,"%d",CPUArchitecture.CoreAndThreadNumbers[0][CoreNumber]);
+        strcat(CoreList,CommaCore);
+        if (Options.UseHyperThreading) {
+            for (ThreadNumber = 1;ThreadNumber < CPUArchitecture.NumberOfThreads;ThreadNumber++) {
+                sprintf(CommaCore,",%d",
+CPUArchitecture.CoreAndThreadNumbers[ThreadNumber][CoreNumber]);
+                strcat(CoreList,CommaCore);
+            }
+        }
+    }
+    return(CoreList);
+}
+//--------------------------------------------------------------------------------------------------
 //----Needed here because it's used in ProcessOptions
 int ExpandCoresToUse(char * Request,int * CoresToUse) {
 
@@ -194,77 +219,114 @@ another\n");
 
 }
 //--------------------------------------------------------------------------------------------------
+void ReportCPUArchitecture(OptionsType Options,CPUArchitectureType CPUArchitecture) {
+
+    int CPUNumber,CoreSibling,ThreadNumber,CoreSiblingsPerCPU;
+
+    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Number of CPUs:     %2d\n",CPUArchitecture.NumberOfCPUs);
+    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Number of cores:    %2d\n",CPUArchitecture.NumberOfCores);
+    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Number of threads:  %2d\n",
+CPUArchitecture.NumberOfThreads);
+
+    CoreSiblingsPerCPU = 
+CPUArchitecture.NumberOfCores/CPUArchitecture.NumberOfCPUs/CPUArchitecture.NumberOfThreads;
+    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Core configuration:\n");
+    for (CPUNumber = 0;CPUNumber < CPUArchitecture.NumberOfCPUs;CPUNumber++) {
+        MyPrintf(Options,VERBOSITY_NONE,TRUE,"    CPU %2d: ",CPUNumber);
+        for (CoreSibling = CPUNumber*CoreSiblingsPerCPU;
+CoreSibling < (CPUNumber+1)*CoreSiblingsPerCPU;CoreSibling++) {
+            for (ThreadNumber = 0;ThreadNumber < CPUArchitecture.NumberOfThreads; ThreadNumber++) {
+                MyPrintf(Options,VERBOSITY_NONE,TRUE,"%2d",
+CPUArchitecture.CoreAndThreadNumbers[ThreadNumber][CoreSibling]);
+                if (CoreSibling < (CPUNumber+1)*CoreSiblingsPerCPU - 1||
+ThreadNumber < CPUArchitecture.NumberOfThreads - 1) {
+                    MyPrintf(Options,VERBOSITY_NONE,TRUE,",");
+                }
+            }
+            MyPrintf(Options,VERBOSITY_NONE,TRUE," ");
+        }
+        MyPrintf(Options,VERBOSITY_NONE,TRUE,"\n");
+    }
+}
+//--------------------------------------------------------------------------------------------------
 char * GenerateHelpLine(OptionsType Options,CPUArchitectureType CPUArchitecture,char Option,
 char * HelpLine) {
+
+    String TheString;
 
     strcpy(HelpLine,"No help for you!");
     switch(Option) {
         case 'u':
-            MySnprintf(HelpLine,MAX_STRING,"Name of the user directory under %s.\n    Default: %s",
+            MySnprintf(HelpLine,MAX_STRING,"Name of the user directory under %s.\n    Value: %s",
 CGROUPS_DIR,Options.CGroupUser);
             break;
         case 'b':
-            MySnprintf(HelpLine,MAX_STRING,"Verbosity.\n    %d = None\n    %d = Program stdout\n    %d = Resource usage\n    %d = Coarse progress\n    %d = Fine progress\n    %d = All\n    %d = Debug\n    Default: %d",
+            MySnprintf(HelpLine,MAX_STRING,"Verbosity.\n    %d = None\n    %d = Program stdout\n    %d = Resource usage\n    %d = Coarse progress\n    %d = Fine progress\n    %d = All\n    %d = Debug\n    Value: %d",
 VERBOSITY_NONE,VERBOSITY_STDOUT_ONLY,VERBOSITY_RESOURCE_USAGE,VERBOSITY_BIG_STEPS,
 VERBOSITY_RLR_ACTIONS,VERBOSITY_ALL,VERBOSITY_DEBUG,Options.Verbosity);
             break;
-        case 'a':
-            MySnprintf(HelpLine,MAX_STRING,"Report CPU architecture.\n    Default: %s",
+        case 'O':
+            MySnprintf(HelpLine,MAX_STRING,"Report options.\n    Value: %s",
+BOOLEAN_TO_STRING(Options.ReportOptions));
+            break;
+        case 'A':
+            MySnprintf(HelpLine,MAX_STRING,"Report CPU architecture.\n    Value: %s",
 BOOLEAN_TO_STRING(Options.ReportCPUArchitecture));
             break;
         case 'C':
-            MySnprintf(HelpLine,MAX_STRING,"CPU time limit, in seconds.\n    Default: %.2fs",
+            MySnprintf(HelpLine,MAX_STRING,"CPU time limit, in seconds.\n    Value: %.2fs",
 Options.CPULimit);
             break;
         case 'W':
-            MySnprintf(HelpLine,MAX_STRING,"WC time limit, in seconds.\n    Default: %.2fs",
+            MySnprintf(HelpLine,MAX_STRING,"WC time limit, in seconds.\n    Value: %.2fs",
 Options.WCLimit);
             break;
         case 'M':
-            MySnprintf(HelpLine,MAX_STRING,"Memory limit, in MiB.\n    Default: %.2fMiB",
+            MySnprintf(HelpLine,MAX_STRING,"Memory limit, in MiB.\n    Value: %.2fMiB",
 Options.RAMLimit);
             break;
         case 'c':
-            MySnprintf(HelpLine,MAX_STRING,"Number of cores to use.\n    Default: All (%d)",
-CPUArchitecture.NumberOfCores);
+            MySnprintf(HelpLine,MAX_STRING,"Cores to use.\n    Value: All (%s)",
+CoresToUseAsString(Options,CPUArchitecture,TheString));
             break;
         case 'y':
-            MySnprintf(HelpLine,MAX_STRING,"Use hyperthreading.\n    Default: %s",
+            MySnprintf(HelpLine,MAX_STRING,"Use hyperthreading.\n    Value: %s",
 BOOLEAN_TO_STRING(Options.UseHyperThreading));
             break;
         case 'm':
-            MySnprintf(HelpLine,MAX_STRING,"Delay between checking resource usage, in seconds.\n    Default: %.2fs",
+            MySnprintf(HelpLine,MAX_STRING,"Delay between checking resource usage, in seconds.\n    Value: %.2fs",
 Options.WCDelayBetweenResourceMonitoring);
             break;
         case 'r':
-            MySnprintf(HelpLine,MAX_STRING,"Delay between reporting resource usage, in seconds.\n    Default: %.2fs",
+            MySnprintf(HelpLine,MAX_STRING,"Delay between reporting resource usage, in seconds.\n    Value: %.2fs",
 Options.WCDelayBetweenResourceUsageReports);
             break;
         case 'd':
-            MySnprintf(HelpLine,MAX_STRING,"Delay between gentle and KILL signals, in seconds.\n    Default: %.2fs",
+            MySnprintf(HelpLine,MAX_STRING,"Delay between gentle and KILL signals, in seconds.\n    Value: %.2fs",
 Options.WCDelayBeforeKill);
             break;
         case 't':
-            MySnprintf(HelpLine,MAX_STRING,"Timestamp program output.\n    Default: %s",
+            MySnprintf(HelpLine,MAX_STRING,"Timestamp program output.\n    Value: %s",
 BOOLEAN_TO_STRING(Options.TimeStamps));
             break;
         case 'o':
-            MySnprintf(HelpLine,MAX_STRING,"File to echo program stdout.\n    Default: %s",
+            MySnprintf(HelpLine,MAX_STRING,"File to echo program stdout.\n    Value: %s",
 Options.ProgramOutputFile == NULL ? "None" : Options.ProgramOutputFile);
             break;
         case 'w':
-            MySnprintf(HelpLine,MAX_STRING,"File to log activity.\n    Default: %s",
+            MySnprintf(HelpLine,MAX_STRING,"File to log activity.\n    Value: %s",
 Options.RLROutputFile == NULL ? "None" : Options.RLROutputFile);
             break;
         case 'v':
-            MySnprintf(HelpLine,MAX_STRING,"File to log activity.\n    Default: %s",
+            MySnprintf(HelpLine,MAX_STRING,"File to log activity.\n    Value: %s",
 Options.RLROutputFile == NULL ? "None" : Options.RLROutputFile);
             break;
         case 'x':
-            MySnprintf(HelpLine,MAX_STRING,"Print an explanation of how this program works.\n");
+            MySnprintf(HelpLine,MAX_STRING,
+"Print an explanation of how this program works, then exit.");
             break;
         case 'h':
-            MySnprintf(HelpLine,MAX_STRING,"Print this help and exit.\n");
+            MySnprintf(HelpLine,MAX_STRING,"Print this help, then exit.");
             break;
         default:
             break;
@@ -273,16 +335,12 @@ Options.RLROutputFile == NULL ? "None" : Options.RLROutputFile);
     return(HelpLine);
 }
 //--------------------------------------------------------------------------------------------------
-void PrintHelp(OptionsType Options,CPUArchitectureType CPUArchitecture,
+void PrintOptions(OptionsType Options,CPUArchitectureType CPUArchitecture,
 struct option LongOptions[]) {
 
     int OptionIndex;
     String HelpLine;
 
-    MyPrintf(Options,VERBOSITY_NONE,TRUE,
-"This ResourceLimitedRun version %s\n",VERSION_NUMBER);
-    MyPrintf(Options,VERBOSITY_NONE,TRUE,
-"Usage: ResourceLimitedRun [Options] 'Program and its arguments'\n");
     MyPrintf(Options,VERBOSITY_NONE,TRUE,"\nOptions are ...\n");
     OptionIndex = 0;
     while (LongOptions[OptionIndex].val != 0) {
@@ -294,6 +352,20 @@ GenerateHelpLine(Options,CPUArchitecture,LongOptions[OptionIndex].val,HelpLine))
         }
         OptionIndex++;
     }
+    if (strlen(Options.ProgramToControl) > 0) {
+        MyPrintf(Options,VERBOSITY_NONE,TRUE,"The program to control is ...\n    %s\n",
+Options.ProgramToControl);
+    }
+}
+//--------------------------------------------------------------------------------------------------
+void PrintHelp(OptionsType Options,CPUArchitectureType CPUArchitecture,
+struct option LongOptions[]) {
+
+    MyPrintf(Options,VERBOSITY_NONE,TRUE,
+"This ResourceLimitedRun version %s\n",VERSION_NUMBER);
+    MyPrintf(Options,VERBOSITY_NONE,TRUE,
+"Usage: ResourceLimitedRun [Options] 'Program and its arguments'\n");
+    PrintOptions(Options,CPUArchitecture,LongOptions);
 }
 //--------------------------------------------------------------------------------------------------
 OptionsType InitializeOptions() {
@@ -304,6 +376,7 @@ OptionsType InitializeOptions() {
         MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not get user name\n");
     }
     Options.Verbosity = VERBOSITY_DEFAULT;
+    Options.ReportOptions = FALSE;
     Options.ReportCPUArchitecture = FALSE;
     Options.CPULimit = -1;
     Options.WCLimit = -1;
@@ -332,7 +405,8 @@ char* argv[]) {
     static struct option LongOptions[] = {
         {"user",                    required_argument, NULL, 'u'},
         {"verbosity",               required_argument, NULL, 'b'},
-        {"report-cpu-architecture", no_argument,       NULL, 'a'},
+        {"report-options",          no_argument,       NULL, 'O'},
+        {"report-cpu-architecture", no_argument,       NULL, 'A'},
         {"cpu-limit",               required_argument, NULL, 'C'},
         {"wall-clock-limit",        required_argument, NULL, 'W'},
         {"mem-soft-limit",          required_argument, NULL, 'M'},
@@ -355,7 +429,7 @@ char* argv[]) {
     };
 
     OptionStartIndex = 0;
-    while ((Option = getopt_long(argc,argv,"u:b:aC:W:M:c:ym:r:d:to:w:v:xh",LongOptions,
+    while ((Option = getopt_long(argc,argv,"u:b:OAC:W:M:c:ym:r:d:to:w:v:xh",LongOptions,
 &OptionStartIndex)) != -1) {
         switch(Option) {
 //---Flag options
@@ -368,7 +442,10 @@ char* argv[]) {
             case 'b':
                 Options.Verbosity = atoi(optarg);
                 break;
-            case 'a':
+            case 'O':
+                Options.ReportOptions = TRUE;
+                break;
+            case 'A':
                 Options.ReportCPUArchitecture = TRUE;
                 break;
             case 'C':
@@ -418,7 +495,7 @@ Options.RLROutputFileName);
                 break;
             case 'x':
                 PrintExplanationOfRLR();
-            case '?':  //----WHat optargs returns for invaild options
+            case '?':  //----What optargs returns for invalid options
             case 'h':
                 PrintHelp(Options,CPUArchitecture,LongOptions);
                 CleanUp(Options,NULL);
@@ -429,49 +506,31 @@ Options.RLROutputFileName);
                 break;
         }
     }
+
 //----The program to control must be next
     if (optind < argc) {
         strcpy(Options.ProgramToControl,argv[optind++]);
-        MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,
-"CPU limit %d, WC limit %d, RAM limit %d, Program %s\n",Options.CPULimit,
-Options.WCLimit,Options.RAMLimit,Options.ProgramToControl);
-    } else {
-        if (!Options.ReportCPUArchitecture) {
+    } 
+//----Can just report options to see defaults (or settings)
+    if (Options.ReportOptions) {
+        PrintOptions(Options,CPUArchitecture,LongOptions);
+        MyPrintf(Options,VERBOSITY_NONE,TRUE,"\n");
+    }
+//----Can just report CPU architecture
+    if (Options.ReportCPUArchitecture) {
+        ReportCPUArchitecture(Options,CPUArchitecture);
+        MyPrintf(Options,VERBOSITY_NONE,TRUE,"\n");
+    }
+    if (strlen(Options.ProgramToControl) == 0) {
+        if (Options.ReportOptions || Options.ReportCPUArchitecture) {
+            CleanUp(Options,NULL);
+            exit(EXIT_SUCCESS);
+        } else {
             MyPrintf(Options,VERBOSITY_ERROR,TRUE,"No program to control\n");
-        }
+        } 
     }
 
     return(Options);
-}
-//--------------------------------------------------------------------------------------------------
-void ReportCPUArchitecture(OptionsType Options,CPUArchitectureType CPUArchitecture) {
-
-    int CPUNumber,CoreSibling,ThreadNumber,CoreSiblingsPerCPU;
-
-    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Number of CPUs:     %2d\n",CPUArchitecture.NumberOfCPUs);
-    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Number of cores:    %2d\n",CPUArchitecture.NumberOfCores);
-    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Number of threads:  %2d\n",
-CPUArchitecture.NumberOfThreads);
-
-    CoreSiblingsPerCPU = 
-CPUArchitecture.NumberOfCores/CPUArchitecture.NumberOfCPUs/CPUArchitecture.NumberOfThreads;
-    MyPrintf(Options,VERBOSITY_NONE,TRUE,"Core configuration:\n");
-    for (CPUNumber = 0;CPUNumber < CPUArchitecture.NumberOfCPUs;CPUNumber++) {
-        MyPrintf(Options,VERBOSITY_NONE,TRUE,"    CPU %2d: ",CPUNumber);
-        for (CoreSibling = CPUNumber*CoreSiblingsPerCPU;
-CoreSibling < (CPUNumber+1)*CoreSiblingsPerCPU;CoreSibling++) {
-            for (ThreadNumber = 0;ThreadNumber < CPUArchitecture.NumberOfThreads; ThreadNumber++) {
-                MyPrintf(Options,VERBOSITY_NONE,TRUE,"%2d",
-CPUArchitecture.CoreAndThreadNumbers[ThreadNumber][CoreSibling]);
-                if (CoreSibling < (CPUNumber+1)*CoreSiblingsPerCPU - 1||
-ThreadNumber < CPUArchitecture.NumberOfThreads - 1) {
-                    MyPrintf(Options,VERBOSITY_NONE,TRUE,",");
-                }
-            }
-            MyPrintf(Options,VERBOSITY_NONE,TRUE," ");
-        }
-        MyPrintf(Options,VERBOSITY_NONE,TRUE,"\n");
-    }
 }
 //--------------------------------------------------------------------------------------------------
 int GetSiblings(OptionsType Options,int CoreNumber,char * SiblingType,int * Siblings) {
@@ -1198,20 +1257,14 @@ int main(int argc, char* argv[]) {
     CPUArchitecture = GetCPUArchitecture(Options);
     Options = ProcessOptions(Options,CPUArchitecture,argc,argv);
 
-    if (Options.ReportCPUArchitecture) {
-        ReportCPUArchitecture(Options,CPUArchitecture);
-//----If only reporting, exit now
-        if (strlen(Options.ProgramToControl) == 0) {
-            CleanUp(Options,NULL);
-            exit(EXIT_SUCCESS);
-        }
-    }
-
     SetUpSignalHandling(Options);
     ParentPID = getpid();
     CGroupFileNames = MakeCGroupFileNames(Options,CGroupFileNames,ParentPID);
     MakeCGroupDirectory(Options,CGroupFileNames);
     LimitCores(Options,CPUArchitecture,CGroupFileNames);
+    MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,
+"CPU limit %d, WC limit %d, RAM limit %d, Program %s\n",Options.CPULimit,Options.WCLimit,
+Options.RAMLimit,Options.ProgramToControl);
 
     if ((ChildPID = fork()) == -1) {
         MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not fork() for child processing");

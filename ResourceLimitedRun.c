@@ -76,9 +76,10 @@ typedef struct {
 typedef struct {
     String CGroupDir;
     String CGroupProcsFile;
-    String CPUStatFile;
-    String RAMStatFile;
     String CPUSetFile;
+    String CPUStatFile;
+    String RAMHighFile;
+    String RAMStatFile;
 } CGroupFileNamesType;
 
 #define MAX_THREADS 2
@@ -114,12 +115,12 @@ void MyPrintf(OptionsType Options,int RequiredVerbosity,BOOLEAN AddPrefix,char *
             case VERBOSITY_RLR_ACTIONS:
             case VERBOSITY_BIG_STEPS:
                 if (AddPrefix) {
-                    snprintf(FinalFormat,MAX_STRING,"RLR says: %s",Format);
+                    snprintf(FinalFormat,MAX_STRING,"%%%% RLR says: %s",Format);
                 }
                 break;
             case VERBOSITY_ALL:
                 if (AddPrefix) {
-                    snprintf(FinalFormat,MAX_STRING,"ALL says: %s",Format);
+                    snprintf(FinalFormat,MAX_STRING,"%%%% ALL says: %s",Format);
                 }
                 break;
             default:
@@ -177,6 +178,10 @@ started from running a supplied program with its arguments. \n\
   - Only the primary core numbers can be listed - the hyperthread cores are turned on separately\n\
   - The core specification can provide physical core numbers, or indices of cores in the order \n\
     they exist in the CPUs. Do a CPU architecture report to see what you have.\n\
++ Run it with a command like ... \"ResourceLimitedRun -W 30 -C 60 -t -e 'MPFibonacci 46'\"\n\
++ Run \"ResourceLimitedRun -h\" for help.\n\
++ Run \"ResourceLimitedRun -O\" to see the default options.\n\
++ Run \"ResourceLimitedRun -A\" to see your CPU architecture.\n\
 ");
 
 }
@@ -753,19 +758,21 @@ int ParentPID) {
 ParentPID);
     MySnprintf(CGroupFileNames.CGroupProcsFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
 "cgroup.procs");
-    MySnprintf(CGroupFileNames.CPUStatFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
-"cpu.stat");
-    MySnprintf(CGroupFileNames.RAMStatFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
-"memory.current");
     MySnprintf(CGroupFileNames.CPUSetFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
 "cpuset.cpus");
+    MySnprintf(CGroupFileNames.CPUStatFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
+"cpu.stat");
+    MySnprintf(CGroupFileNames.RAMHighFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
+"memory.high");
+    MySnprintf(CGroupFileNames.RAMStatFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
+"memory.current");
 
     return(CGroupFileNames);
 }
 //--------------------------------------------------------------------------------------------------
 void MakeCGroupDirectory(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
 
-    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"Make cgroup directory %s\n",
+    MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,"Make cgroup directory %s\n",
 CGroupFileNames.CGroupDir);
     if (mkdir(CGroupFileNames.CGroupDir,0755) != 0) {
         MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not create %s\n",CGroupFileNames.CGroupDir);
@@ -779,7 +786,7 @@ void RemoveCGroupDirectory(OptionsType Options,CGroupFileNamesType CGroupFileNam
     if (! BeenHereBefore) {
         BeenHereBefore = TRUE;
         if (strlen(CGroupFileNames.CGroupDir) > 0) {
-            MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"Remove cgroup directory %s\n",
+            MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,"Remove cgroup directory %s\n",
 CGroupFileNames.CGroupDir);
             if (rmdir(CGroupFileNames.CGroupDir) != 0) {
                 MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not remove %s\n",
@@ -808,6 +815,24 @@ CGroupFileNames.CPUSetFile);
 CGroupFileNames.CPUSetFile);
         }
         fclose(CPUFile);
+    }
+}
+//--------------------------------------------------------------------------------------------------
+void LimitMemory(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
+
+    FILE* RAMFile;
+
+//----Set memory.high to 1M less than limit to encourage swapping
+    if (Options.RAMLimit >= 2.0) {
+        if ((RAMFile = fopen(CGroupFileNames.RAMHighFile,"w")) == NULL) {
+            MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not open %s for writing\n",
+CGroupFileNames.RAMHighFile);
+        }
+        if (fprintf(RAMFile,"%.0fM",Options.RAMLimit - 1.0) == EOF) {
+            MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not write to %s\n",
+CGroupFileNames.RAMHighFile);
+        }
+        fclose(RAMFile);
     }
 }
 //--------------------------------------------------------------------------------------------------
@@ -1062,7 +1087,7 @@ getppid());
 PIDOfRLR);
     }
 
-    MyPrintf(Options,VERBOSITY_DEBUG,TRUE,"Child %d about to execvp %s\n",ChildPID,
+    MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,"Program process %d about to execvp %s\n",ChildPID,
 Options.ProgramToControl);
 //----Note all signal handling is reset
     execvp(MyArgV[0],MyArgV);
@@ -1070,8 +1095,8 @@ Options.ProgramToControl);
 Options.ProgramToControl);
 }
 //--------------------------------------------------------------------------------------------------
-void StartChildProcessing(OptionsType Options,char * CGroupProcsFile,char * CPUStatFile,
-int PIDOfRLR) {
+void StartChildProcessing(OptionsType Options,CGroupFileNamesType CGroupFileNames,
+CPUArchitectureType CPUArchitecture,int PIDOfRLR) {
 
     struct sigaction SignalHandling;
     int ChildPID;
@@ -1099,37 +1124,40 @@ int PIDOfRLR) {
         dup2(Pipe[1],STDOUT_FILENO);
         dup2(Pipe[1],STDERR_FILENO);
         setbuf(stdout,NULL);
-        StartChildProgram(Options,CGroupProcsFile,PIDOfRLR);
+        LimitCores(Options,CPUArchitecture,CGroupFileNames);
+        LimitMemory(Options,CGroupFileNames);
+        StartChildProgram(Options,CGroupFileNames.CGroupProcsFile,PIDOfRLR);
     } else {
         strcpy(TimeStamp,"");
         close(Pipe[1]);
         PipeReader = fdopen(Pipe[0],"r");
         MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,
-"Wait for child %d to add itself to the cgroup %s\n",ChildPID,CGroupProcsFile);
+"Wait for child %d to add itself to the cgroup %s\n",ChildPID,CGroupFileNames.CGroupProcsFile);
         pause();
-        MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"Child %d has started\n",ChildPID);
+        MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,"Output monitor has started\n");
 //----Start the clocks, hopefully about the same time as the parent - both signalled by job
-        CPUUsage(Options,CPUStatFile,NULL,NULL);
+        CPUUsage(Options,CGroupFileNames.CPUStatFile,NULL,NULL);
         WCUsage(Options);
         MyPrintf(Options,VERBOSITY_DEBUG,TRUE,"Start reading from child %d\n",ChildPID);
         while (fgets(ChildOutput,MAX_STRING,PipeReader) != NULL) {
             if (Options.TimeStamps) {
 //----Output WC/CPU
                 MySnprintf(TimeStamp,MAX_STRING,"%6.2f/%6.2f\t",WCUsage(Options),
-CPUUsage(Options,CPUStatFile,NULL,NULL));
+CPUUsage(Options,CGroupFileNames.CPUStatFile,NULL,NULL));
             }
             MyPrintf(Options,VERBOSITY_STDOUT_ONLY,TRUE,"%s%s",TimeStamp,ChildOutput);
             if (Options.ProgramOutputFile != NULL) {
                 fprintf(Options.ProgramOutputFile,"%s%s",TimeStamp,ChildOutput);
             }
         }
-        MyPrintf(Options,VERBOSITY_DEBUG,TRUE,"Finished reading from child %d\n",ChildPID);
+        MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,"Output monitor finished reading from %d\n",
+ChildPID);
         fclose(PipeReader);
 
         if (Options.AddEOF) {
             if (Options.TimeStamps) {
                 MySnprintf(TimeStamp,MAX_STRING,"%6.2f/%6.2f\t",WCUsage(Options),
-CPUUsage(Options,CPUStatFile,NULL,NULL));
+CPUUsage(Options,CGroupFileNames.CPUStatFile,NULL,NULL));
                 MyPrintf(Options,VERBOSITY_STDOUT_ONLY,TRUE,"%sEOF\n",TimeStamp);
             }
             fflush(stdout);
@@ -1203,22 +1231,26 @@ NumberOfProccessesInCGroup);
         WCUsed = WCUsage(Options);
         RAMUsed = RAMUsage(Options,CGroupFileNames.RAMStatFile,FALSE);
         if (Options.CPULimit > 0 && CPUUsed > Options.CPULimit) {
-            MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"CPU limit reached, killing processes\n");
+            MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,
+"CPU limit reached, killing processes\n");
             KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGXCPU,WCUsed);
             DoneSomeKilling = TRUE;
         }
         if (Options.WCLimit > 0 && WCUsed > Options.WCLimit) {
-            MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"WC limit reached, killing processes\n");
+            MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,
+"WC limit reached, killing processes\n");
             KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGALRM,WCUsed);
             DoneSomeKilling = TRUE;
         }
         if (Options.RAMLimit > 0 && RAMUsed > Options.RAMLimit) {
-            MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"RAM limit reached, killing processes\n");
+            MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,
+"RAM limit reached, killing processes\n");
             KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGTERM,WCUsed);
             DoneSomeKilling = TRUE;
         }
         if (GlobalInterrupted) {
-            MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"User interrupt, killing processes\n");
+            MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,
+"User interrupt, killing processes\n");
             KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGUSR1,WCUsed);
             DoneSomeKilling = TRUE;
         }
@@ -1304,7 +1336,6 @@ int main(int argc, char* argv[]) {
     ParentPID = getpid();
     CGroupFileNames = MakeCGroupFileNames(Options,CGroupFileNames,ParentPID);
     MakeCGroupDirectory(Options,CGroupFileNames);
-    LimitCores(Options,CPUArchitecture,CGroupFileNames);
     MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,
 "CPU limit %d, WC limit %d, RAM limit %d, Program %s\n",Options.CPULimit,Options.WCLimit,
 Options.RAMLimit,Options.ProgramToControl);
@@ -1314,8 +1345,7 @@ Options.RAMLimit,Options.ProgramToControl);
     }
 
     if (ChildPID == 0) {
-        StartChildProcessing(Options,CGroupFileNames.CGroupProcsFile,CGroupFileNames.CPUStatFile,
-ParentPID);
+        StartChildProcessing(Options,CGroupFileNames,CPUArchitecture,ParentPID);
         exit(EXIT_SUCCESS);
     } else {
         MyPrintf(Options,VERBOSITY_DEBUG,TRUE,"In RLR with PID %d\n",ParentPID);

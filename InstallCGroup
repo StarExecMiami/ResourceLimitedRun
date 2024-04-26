@@ -4,27 +4,33 @@
 #----for the cgroup directory under which the cgroup for the programs that run are greated, using
 #----PIDs to keep them separated.
 
-if (THERE are TWO ARGS) then
-    set CGroupUserName = THE ARG
-    set CGroupGroupName = THE NEXT ARG
-else
-    set CGroupUserName = $USER
-    set CGroupGroupName = $GROUP
+if ($#argv < 2) then
+    echo "Supply user name and user group name"
+    exit
 endif
 
+set CGroupUserName = "$1"
+set CGroupGroupName = "$2"
+echo "CGroupUserName is $CGroupUserName and CGroupGroupName is $CGroupGroupName"
+
 cd /sys/fs/cgroup/
-#----These all need sudo
 #----The top level cgroup.procs needs to be writable because the PIDs put in the lower cgroups
 #----get propagated upwards
+echo "chmod 666 cgroup.procs"
 chmod 666 cgroup.procs
 
-#----This needs sudo
+#----Make the cgroup
+echo "mkdir $CGroupUserName"
 mkdir $CGroupUserName
-#----This needs sudo
-chown -R $CGroupUserName:$CGroupGroupName $CGroupUserName
+echo "chown -R ${CGroupUserName}:${CGroupGroupName} $CGroupUserName"
+chown -R ${CGroupUserName}:${CGroupGroupName} $CGroupUserName
+
+echo "cd $CGroupUserName"
 cd $CGroupUserName
-echo "+cpu +cpuset" | sudo tee cgroup.subtree_control    # Also puts cpu in tptp/cgroup.subtree_control
-echo "+memory +cpu + cupset" >> cgroup.subtree_control   # NEED TO MAKE THIS DEFAULT
+#----Add the control groups
+echo "echo '+memory +cpu +cpuset' >> cgroup.subtree_control"
+echo '+memory +cpu +cpuset' >> cgroup.subtree_control   # NEED TO MAKE THIS DEFAULT
 #----Make tptp own the new stuff
-chown $CGroupUserName:$CGroupGroupName *   
+echo "chown ${CGroupUserName}:${CGroupGroupName} *"
+chown ${CGroupUserName}:${CGroupGroupName} *   
 

@@ -178,11 +178,12 @@ started from running a supplied program with its arguments. \n\
   - Only the primary core numbers can be listed - the hyperthread cores are turned on separately\n\
   - The core specification can provide physical core numbers, or indices of cores in the order \n\
     they exist in the CPUs. Do a CPU architecture report to see what you have.\n\
-+ Run it with a command like ... \"ResourceLimitedRun -W 30 -C 60 -t -e 'MPFibonacci 46'\"\n\
 + Run \"ResourceLimitedRun -h\" for help.\n\
 + Run \"ResourceLimitedRun -O\" to see the default options.\n\
   Set options before -O to see them listed.\n\
 + Run \"ResourceLimitedRun -A\" to see your CPU architecture.\n\
++ Run with a command like ... \"ResourceLimitedRun -W 30 -C 60 -t -e 'MPFibonacci 46'\"\n\
+  to see the action.\n\
 ");
 
 }

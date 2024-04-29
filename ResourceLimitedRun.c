@@ -181,6 +181,7 @@ started from running a supplied program with its arguments. \n\
 + Run it with a command like ... \"ResourceLimitedRun -W 30 -C 60 -t -e 'MPFibonacci 46'\"\n\
 + Run \"ResourceLimitedRun -h\" for help.\n\
 + Run \"ResourceLimitedRun -O\" to see the default options.\n\
+  Set options before -O to see them listed.\n\
 + Run \"ResourceLimitedRun -A\" to see your CPU architecture.\n\
 ");
 

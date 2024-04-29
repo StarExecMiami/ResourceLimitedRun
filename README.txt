@@ -1,6 +1,7 @@
 To make it work ...
 
-sudo InstallCGroup $USER $GROUP
+sudo ./InstallCGroup.bash
 make
-ResourceLimitedRun -x
+./ResourceLimitedRun -x
+./ResourceLimitedRun -h
 

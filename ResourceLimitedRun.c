@@ -618,7 +618,7 @@ CoreNumber,SiblingType);
         MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not read line from %s\n",FileName);
     }
     fclose(CPUFile);
-//DEBUG printf("for %s got line %s\n",SiblingType,SiblingsLine);
+printf("for %s got line %s\n",SiblingType,SiblingsLine);
     return(ExpandCoresToUse(Options,SiblingsLine,Siblings));
 }
 //--------------------------------------------------------------------------------------------------
@@ -644,18 +644,18 @@ CPUArchitectureType GetCPUArchitecture(OptionsType Options) {
         MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Number of cores %d exceed maximum %d\n",
 CPUArchitecture.NumberOfCores,MAX_CORES);
     }
-//DEBUG printf("There are %d cores\n",CPUArchitecture.NumberOfCores);
+printf("There are %d cores\n",CPUArchitecture.NumberOfCores);
     CoreThreadGroup = 0;
     for (CoreNumber= 0;CoreNumber < CPUArchitecture.NumberOfCores;CoreNumber++) {
 //----If the core is in this process's set
         if (CPU_ISSET(CoreNumber,&AffinityMask)) {
             CPUArchitecture.NumberOfCPUs++;
-//DEBUG printf("Core number %d is available\n",CoreNumber);
+printf("Core number %d is available\n",CoreNumber);
             NumberOfCoreSiblings = GetSiblings(Options,CoreNumber,"core",CoreSiblings);
-//DEBUG printf("Core %d has %d core siblines\n",CoreNumber,NumberOfCoreSiblings);
+printf("Core %d has %d core siblines\n",CoreNumber,NumberOfCoreSiblings);
             for (CoreSiblingNumber = 0;CoreSiblingNumber < NumberOfCoreSiblings;
 CoreSiblingNumber++) {
-//DEBUG printf("Dealing with core sibling of %d, sibling is %d\n",CoreNumber,CoreSiblings[CoreSiblingNumber]);
+printf("Dealing with core sibling of %d, sibling is %d\n",CoreNumber,CoreSiblings[CoreSiblingNumber]);
 //----If this group of threads has not been dealt with yet
                 if (CPU_ISSET(CoreSiblings[CoreSiblingNumber],&AffinityMask)) {
                     CPUArchitecture.NumberOfThreads = GetSiblings(Options,
@@ -670,11 +670,11 @@ ThreadSiblingNumber < CPUArchitecture.NumberOfThreads;ThreadSiblingNumber++) {
                         CPUArchitecture.CoreAndThreadNumbers[ThreadSiblingNumber]
 [CoreThreadGroup] = ThreadSiblings[ThreadSiblingNumber];
                         CPU_CLR(ThreadSiblings[ThreadSiblingNumber],&AffinityMask);
-//DEBUG printf("Core %d stored at thread row %d for core column %d\n",ThreadSiblings[ThreadSiblingNumber],ThreadSiblingNumber,CoreThreadGroup);
+printf("Core %d stored at thread row %d for core column %d\n",ThreadSiblings[ThreadSiblingNumber],ThreadSiblingNumber,CoreThreadGroup);
                     }
                     CoreThreadGroup++;
                 } else {
-//DEBUG printf("already dealt with core %d\n",CoreSiblings[CoreSiblingNumber]);
+printf("already dealt with core %d\n",CoreSiblings[CoreSiblingNumber]);
                 }
             }
         }

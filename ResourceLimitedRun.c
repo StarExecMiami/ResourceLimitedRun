@@ -251,10 +251,9 @@ CPUArchitecture.CoreAndThreadNumbers[ThreadNumber][Options.CoresToUse[CoreNumber
 }
 //--------------------------------------------------------------------------------------------------
 //----Needed here because it's used in ProcessOptions
-int ExpandCoresToUse(OptionsType Options,char * Request,int * CoresToUse) {
+int ExpandCoresToUse(char * Request,int * CoresToUse) {
 
     int NumberOfCores;
-    int CoreNumber;
     char * CSV;
     char * Dash;
     int Start,End,Number;
@@ -280,14 +279,6 @@ int ExpandCoresToUse(OptionsType Options,char * Request,int * CoresToUse) {
         }
         CSV = strtok(NULL," ");
 //DEBUG printf("next comma token is %s\n",CSV);
-    }
-//----Check user has not asked for something impossible. This assumes the core numbers are 
-//----contiguous.
-    for (CoreNumber=0; CoreNumber < NumberOfCores; CoreNumber++) {
-        if (CoresToUse[CoreNumber] > NumberOfCores) {
-            MyPrintf(Options,VERBOSITY_ERROR,TRUE,
-"Request for core %d, but there are only %d cores\n",CoresToUse[CoreNumber],NumberOfCores);
-        }
     }
 
     return(NumberOfCores);
@@ -459,6 +450,7 @@ char* argv[]) {
 
     int Option;
     int OptionStartIndex;
+    int CoreNumber;
 
     static struct option LongOptions[] = {
         {"user",                    required_argument, NULL, 'u'},
@@ -522,7 +514,16 @@ char* argv[]) {
             case 'p':
                 Options.PhysicalCoreList = TRUE;
             case 'c':
-                Options.NumberOfCoresToUse = ExpandCoresToUse(Options,optarg,Options.CoresToUse);
+                Options.NumberOfCoresToUse = ExpandCoresToUse(optarg,Options.CoresToUse);
+//----Check user has not asked for something impossible. This assumes the core numbers are 
+//----contiguous.
+                for (CoreNumber=0; CoreNumber < Options.NumberOfCoresToUse; CoreNumber++) {
+                    if (Options.CoresToUse[CoreNumber] > Options.NumberOfCoresToUse) {
+                        MyPrintf(Options,VERBOSITY_ERROR,TRUE,
+"Request for core %d, but there are only %d cores\n",Options.CoresToUse[CoreNumber],
+Options.NumberOfCoresToUse);
+                    }
+                }
                 break;
             case 'y':
                 Options.UseHyperThreading = TRUE;
@@ -618,8 +619,8 @@ CoreNumber,SiblingType);
         MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not read line from %s\n",FileName);
     }
     fclose(CPUFile);
-printf("for %s got line %s\n",SiblingType,SiblingsLine);
-    return(ExpandCoresToUse(Options,SiblingsLine,Siblings));
+//DEBUG printf("for %s got line %s\n",SiblingType,SiblingsLine);
+    return(ExpandCoresToUse(SiblingsLine,Siblings));
 }
 //--------------------------------------------------------------------------------------------------
 CPUArchitectureType GetCPUArchitecture(OptionsType Options) {
@@ -644,18 +645,18 @@ CPUArchitectureType GetCPUArchitecture(OptionsType Options) {
         MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Number of cores %d exceed maximum %d\n",
 CPUArchitecture.NumberOfCores,MAX_CORES);
     }
-printf("There are %d cores\n",CPUArchitecture.NumberOfCores);
+//DEBUG printf("There are %d cores\n",CPUArchitecture.NumberOfCores);
     CoreThreadGroup = 0;
     for (CoreNumber= 0;CoreNumber < CPUArchitecture.NumberOfCores;CoreNumber++) {
 //----If the core is in this process's set
         if (CPU_ISSET(CoreNumber,&AffinityMask)) {
             CPUArchitecture.NumberOfCPUs++;
-printf("Core number %d is available\n",CoreNumber);
+//DEBUG printf("Core number %d is available\n",CoreNumber);
             NumberOfCoreSiblings = GetSiblings(Options,CoreNumber,"core",CoreSiblings);
-printf("Core %d has %d core siblines\n",CoreNumber,NumberOfCoreSiblings);
+//DEBUG printf("Core %d has %d core siblines\n",CoreNumber,NumberOfCoreSiblings);
             for (CoreSiblingNumber = 0;CoreSiblingNumber < NumberOfCoreSiblings;
 CoreSiblingNumber++) {
-printf("Dealing with core sibling of %d, sibling is %d\n",CoreNumber,CoreSiblings[CoreSiblingNumber]);
+//DEBUG printf("Dealing with core sibling of %d, sibling is %d\n",CoreNumber,CoreSiblings[CoreSiblingNumber]);
 //----If this group of threads has not been dealt with yet
                 if (CPU_ISSET(CoreSiblings[CoreSiblingNumber],&AffinityMask)) {
                     CPUArchitecture.NumberOfThreads = GetSiblings(Options,
@@ -670,11 +671,11 @@ ThreadSiblingNumber < CPUArchitecture.NumberOfThreads;ThreadSiblingNumber++) {
                         CPUArchitecture.CoreAndThreadNumbers[ThreadSiblingNumber]
 [CoreThreadGroup] = ThreadSiblings[ThreadSiblingNumber];
                         CPU_CLR(ThreadSiblings[ThreadSiblingNumber],&AffinityMask);
-printf("Core %d stored at thread row %d for core column %d\n",ThreadSiblings[ThreadSiblingNumber],ThreadSiblingNumber,CoreThreadGroup);
+//DEBUG printf("Core %d stored at thread row %d for core column %d\n",ThreadSiblings[ThreadSiblingNumber],ThreadSiblingNumber,CoreThreadGroup);
                     }
                     CoreThreadGroup++;
                 } else {
-printf("already dealt with core %d\n",CoreSiblings[CoreSiblingNumber]);
+//DEBUG printf("already dealt with core %d\n",CoreSiblings[CoreSiblingNumber]);
                 }
             }
         }

@@ -5,12 +5,12 @@
 #----PIDs to keep them separated.
 
 if ($#argv < 2) then
-    echo "Supply user name and user group name"
-    exit
+    set CGroupUserName=`id -u -n`
+    set CGroupGroupName=`id -g -n`
+else
+    set CGroupUserName = "$1"
+    set CGroupGroupName = "$2"
 endif
-
-set CGroupUserName = "$1"
-set CGroupGroupName = "$2"
 echo "CGroupUserName is $CGroupUserName and CGroupGroupName is $CGroupGroupName"
 
 cd /sys/fs/cgroup/
@@ -21,16 +21,16 @@ chmod 666 cgroup.procs
 
 #----Make the cgroup
 echo "mkdir $CGroupUserName"
-mkdir $CGroupUserName
+mkdir "$CGroupUserName"
 echo "chown -R ${CGroupUserName}:${CGroupGroupName} $CGroupUserName"
-chown -R ${CGroupUserName}:${CGroupGroupName} $CGroupUserName
+chown -R "${CGroupUserName}:${CGroupGroupName}" "$CGroupUserName"
 
 echo "cd $CGroupUserName"
-cd $CGroupUserName
+cd "$CGroupUserName"
 #----Add the control groups
 echo "echo '+memory +cpu +cpuset' >> cgroup.subtree_control"
-echo '+memory +cpu +cpuset' >> cgroup.subtree_control   # NEED TO MAKE THIS DEFAULT
-#----Make tptp own the new stuff
+echo '+memory +cpu +cpuset' >> cgroup.subtree_control
+#----Make user own the new stuff
 echo "chown ${CGroupUserName}:${CGroupGroupName} *"
-chown ${CGroupUserName}:${CGroupGroupName} *   
+chown "${CGroupUserName}:${CGroupGroupName}" *   
 

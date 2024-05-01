@@ -71,6 +71,7 @@ typedef struct {
     FILE* RLROutputFile;
     String VarFileName;
     String ProgramToControl;
+    char ** ProgramToControlArgs;
 } OptionsType;
 
 typedef struct {
@@ -389,6 +390,7 @@ struct option LongOptions[]) {
 
     int OptionIndex;
     String HelpLine;
+    int ArgIndex;
 
     MyPrintf(Options,VERBOSITY_NONE,TRUE,"\nOptions are ...\n");
     OptionIndex = 0;
@@ -402,8 +404,14 @@ GenerateHelpLine(Options,CPUArchitecture,LongOptions[OptionIndex].val,HelpLine))
         OptionIndex++;
     }
     if (strlen(Options.ProgramToControl) > 0) {
-        MyPrintf(Options,VERBOSITY_NONE,TRUE,"The program to control is ...\n    %s\n",
+        MyPrintf(Options,VERBOSITY_NONE,TRUE,"The program to control is ...\n    %s",
 Options.ProgramToControl);
+        ArgIndex = 1;
+        while (Options.ProgramToControlArgs[ArgIndex] != NULL) {
+            MyPrintf(Options,VERBOSITY_NONE,TRUE," %s",Options.ProgramToControlArgs[ArgIndex]);
+            ArgIndex++;
+        }
+        MyPrintf(Options,VERBOSITY_NONE,TRUE,"\n");
     }
 }
 //--------------------------------------------------------------------------------------------------
@@ -413,7 +421,7 @@ struct option LongOptions[]) {
     MyPrintf(Options,VERBOSITY_NONE,TRUE,
 "This ResourceLimitedRun version %s\n",VERSION_NUMBER);
     MyPrintf(Options,VERBOSITY_NONE,TRUE,
-"Usage: ResourceLimitedRun [Options] 'Program and its arguments'\n");
+"Usage: ResourceLimitedRun [Options] Program-and-its-arguments\n");
     PrintOptions(Options,CPUArchitecture,LongOptions);
 }
 //--------------------------------------------------------------------------------------------------
@@ -442,17 +450,19 @@ OptionsType InitializeOptions() {
     Options.RLROutputFile = NULL;
     strcpy(Options.VarFileName,"");
     strcpy(Options.ProgramToControl,"");
+    Options.ProgramToControlArgs = NULL;
 
     return(Options);
 }
 //--------------------------------------------------------------------------------------------------
 //----Process options and fills out the struct with user's command line arguemnts
 OptionsType ProcessOptions(OptionsType Options,CPUArchitectureType CPUArchitecture,int argc, 
-char* argv[]) {
+char * argv[]) {
 
     int Option;
     int OptionStartIndex;
     int CoreNumber;
+    char * Slash;
 
     static struct option LongOptions[] = {
         {"user",                    required_argument, NULL, 'u'},
@@ -582,7 +592,12 @@ Options.RLROutputFileName);
 
 //----The program to control must be next
     if (optind < argc) {
-        strcpy(Options.ProgramToControl,argv[optind++]);
+        strcpy(Options.ProgramToControl,argv[optind]);
+        Options.ProgramToControlArgs = &(argv[optind]);
+//----Change 0th to be ProgramToControl without /
+        if ((Slash = strrchr(Options.ProgramToControlArgs[0],'/')) != NULL) {
+            Options.ProgramToControlArgs[0] = Slash+1;
+        }
     } 
 //----Can just report options to see defaults (or settings)
     if (Options.ReportOptions) {
@@ -784,17 +799,12 @@ CGroupFileNames.CGroupDir);
 //--------------------------------------------------------------------------------------------------
 void RemoveCGroupDirectory(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
 
-    static BOOLEAN BeenHereBefore = FALSE;
-
-    if (! BeenHereBefore) {
-        BeenHereBefore = TRUE;
-        if (strlen(CGroupFileNames.CGroupDir) > 0) {
-            MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,"Remove cgroup directory %s\n",
+    if (strlen(CGroupFileNames.CGroupDir) > 0 && access(CGroupFileNames.CGroupDir,F_OK)) {
+        MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,"Remove cgroup directory %s\n",
 CGroupFileNames.CGroupDir);
-            if (rmdir(CGroupFileNames.CGroupDir) != 0) {
-                MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not remove %s\n",
+        if (rmdir(CGroupFileNames.CGroupDir) != 0) {
+            MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not remove %s\n",
 CGroupFileNames.CGroupDir);
-            }
         }
     }
 }
@@ -1061,8 +1071,6 @@ void StartChildProgram(OptionsType Options,char * CGroupProcsFile,int PIDOfRLR) 
     int ChildPID;
     FILE* ShellFile;
     String ShellCommand;
-    char *MyArgV[MAX_ARGS];
-    int MyArgC;
 
     ChildPID = getpid();
     MyPrintf(Options,VERBOSITY_DEBUG,TRUE,"In CHILD with PID %d\n",ChildPID);
@@ -1073,11 +1081,6 @@ void StartChildProgram(OptionsType Options,char * CGroupProcsFile,int PIDOfRLR) 
     fprintf(ShellFile,"%d\n",ChildPID);
     pclose(ShellFile);
 
-    MyArgC = 0;
-    MyArgV[MyArgC] = strtok(Options.ProgramToControl," ");
-    while (MyArgV[MyArgC++] != NULL) {
-        MyArgV[MyArgC] = strtok(NULL," ");
-    }
 //----Tell RLR the timing should start
     MyPrintf(Options,VERBOSITY_DEBUG,TRUE,
 "Child %d tells parent %d and grandparent %d to start monitoring\n",ChildPID,getppid(),PIDOfRLR);
@@ -1093,7 +1096,7 @@ PIDOfRLR);
     MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,"Program process %d about to execvp %s\n",ChildPID,
 Options.ProgramToControl);
 //----Note all signal handling is reset
-    execvp(MyArgV[0],MyArgV);
+    execvp(Options.ProgramToControl,Options.ProgramToControlArgs);
     MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Child %d could not execvp %s\n",ChildPID,
 Options.ProgramToControl);
 }
@@ -1130,6 +1133,7 @@ CPUArchitectureType CPUArchitecture,int PIDOfRLR) {
         LimitCores(Options,CPUArchitecture,CGroupFileNames);
         LimitMemory(Options,CGroupFileNames);
         StartChildProgram(Options,CGroupFileNames.CGroupProcsFile,PIDOfRLR);
+        exit(EXIT_FAILURE);
     } else {
         strcpy(TimeStamp,"");
         close(Pipe[1]);
@@ -1319,7 +1323,7 @@ Options.RLROutputFileName);
     }
 }
 //--------------------------------------------------------------------------------------------------
-int main(int argc, char* argv[]) {
+int main(int argc, char * argv[]) {
 
     OptionsType Options;
     CGroupFileNamesType CGroupFileNames;

@@ -38,6 +38,8 @@
 #define DEFAULT_WC_DELAY_BEFORE_KILL 1.0
 #define DEFAULT_WC_DELAY_BETWEEN_RESOURCE_MONITORING 0.5
 #define DEFAULT_WC_DELAY_BETWEEN_RESOURCE_REPORTS 1.0
+#define MIN_MEM_LIMIT_TO_SET_SWAPPING 2.0
+#define MEM_LIMIT_USE_TO_START_SWAPPING 0.9
 
 #define MAX_ARGS 256
 #define MAX_STRING 1024
@@ -55,7 +57,7 @@ typedef struct {
     BOOLEAN ReportCPUArchitecture;
     int CPULimit;
     int WCLimit;
-    int RAMLimit;
+    int MEMLimit;
     BOOLEAN PhysicalCoreList;
     int CoresToUse[MAX_CORES];
     int NumberOfCoresToUse;
@@ -79,8 +81,8 @@ typedef struct {
     String CGroupProcsFile;
     String CPUSetFile;
     String CPUStatFile;
-    String RAMHighFile;
-    String RAMStatFile;
+    String MEMHighFile;
+    String MEMStatFile;
 } CGroupFileNamesType;
 
 #define MAX_THREADS 2
@@ -321,7 +323,7 @@ Options.WCLimit);
             break;
         case 'M':
             MySnprintf(HelpLine,MAX_STRING,"Memory limit, in MiB.\n    Value: %.2fMiB",
-Options.RAMLimit);
+Options.MEMLimit);
             break;
         case 'p':
             MySnprintf(HelpLine,MAX_STRING,"Physical cores to use.\n    Value: %s",
@@ -435,9 +437,9 @@ OptionsType InitializeOptions() {
     Options.Verbosity = VERBOSITY_DEFAULT;
     Options.ReportOptions = FALSE;
     Options.ReportCPUArchitecture = FALSE;
-    Options.CPULimit = -1;
-    Options.WCLimit = -1;
-    Options.RAMLimit = -1;
+    Options.CPULimit = 0;
+    Options.WCLimit = 0;
+    Options.MEMLimit = 0;
     Options.PhysicalCoreList = FALSE;
     Options.NumberOfCoresToUse = 0;
     Options.UseHyperThreading = FALSE;
@@ -521,7 +523,7 @@ char * argv[]) {
                 Options.WCLimit = atoi(optarg);
                 break;
             case 'M':
-                Options.RAMLimit= atoi(optarg);
+                Options.MEMLimit= atoi(optarg);
                 break;
             case 'p':
                 Options.PhysicalCoreList = TRUE;
@@ -763,7 +765,7 @@ CGroupFileNamesType InitializeCGroupFileNames() {
     strcpy(CGroupFileNames.CGroupDir,"");
     strcpy(CGroupFileNames.CGroupProcsFile,"");
     strcpy(CGroupFileNames.CPUStatFile,"");
-    strcpy(CGroupFileNames.RAMStatFile,"");
+    strcpy(CGroupFileNames.MEMStatFile,"");
     strcpy(CGroupFileNames.CPUSetFile,"");
 
     return(CGroupFileNames);
@@ -780,9 +782,9 @@ ParentPID);
 "cpuset.cpus");
     MySnprintf(CGroupFileNames.CPUStatFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
 "cpu.stat");
-    MySnprintf(CGroupFileNames.RAMHighFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
+    MySnprintf(CGroupFileNames.MEMHighFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
 "memory.high");
-    MySnprintf(CGroupFileNames.RAMStatFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
+    MySnprintf(CGroupFileNames.MEMStatFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
 "memory.current");
 
     return(CGroupFileNames);
@@ -833,19 +835,19 @@ CGroupFileNames.CPUSetFile);
 //--------------------------------------------------------------------------------------------------
 void LimitMemory(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
 
-    FILE* RAMFile;
+    FILE* MEMFile;
 
 //----Set memory.high to 1M less than limit to encourage swapping
-    if (Options.RAMLimit >= 2.0) {
-        if ((RAMFile = fopen(CGroupFileNames.RAMHighFile,"w")) == NULL) {
+    if (Options.MEMLimit >= MIN_MEM_LIMIT_TO_SET_SWAPPING) {
+        if ((MEMFile = fopen(CGroupFileNames.MEMHighFile,"w")) == NULL) {
             MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not open %s for writing\n",
-CGroupFileNames.RAMHighFile);
+CGroupFileNames.MEMHighFile);
         }
-        if (fprintf(RAMFile,"%.0fM",Options.RAMLimit - 1.0) == EOF) {
+        if (fprintf(MEMFile,"%.2fM",Options.MEMLimit * MEM_LIMIT_USE_TO_START_SWAPPING) == EOF) {
             MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not write to %s\n",
-CGroupFileNames.RAMHighFile);
+CGroupFileNames.MEMHighFile);
         }
-        fclose(RAMFile);
+        fclose(MEMFile);
     }
 }
 //--------------------------------------------------------------------------------------------------
@@ -879,16 +881,16 @@ fscanf(ShellFile,"%d",&PIDsInCGroup[NumberOfProccessesInCGroup]) != EOF) {
 }
 //--------------------------------------------------------------------------------------------------
 //----Get memory usage in MiB
-double RAMUsage(OptionsType Options,char * RAMStatFile,BOOLEAN ReportMax) {
+double MEMUsage(OptionsType Options,char * MEMStatFile,BOOLEAN ReportMax) {
 
     String ShellCommand;
     FILE* ShellFile;
     long Bytes;
     static long MaxBytes = 0;
 
-    MySnprintf(ShellCommand,MAX_STRING,"cat %s",RAMStatFile);
+    MySnprintf(ShellCommand,MAX_STRING,"cat %s",MEMStatFile);
     if ((ShellFile = popen(ShellCommand,"r")) == NULL) {
-        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not open %s for reading\n",RAMStatFile);
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not open %s for reading\n",MEMStatFile);
     }
     fscanf(ShellFile,"%ld",&Bytes);
     pclose(ShellFile);
@@ -897,7 +899,7 @@ double RAMUsage(OptionsType Options,char * RAMStatFile,BOOLEAN ReportMax) {
     }
 
 //----Report in MiB
-    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"RAM usage (max) is:     %6.2fMiB (%.2fMiB)\n",
+    MyPrintf(Options,VERBOSITY_RLR_ACTIONS,TRUE,"MEM usage (max) is:     %6.2fMiB (%.2fMiB)\n",
 Bytes/BYTES_PER_MIB,MaxBytes/BYTES_PER_MIB);
 
     if (ReportMax) {
@@ -1177,17 +1179,17 @@ CPUUsage(Options,CGroupFileNames.CPUStatFile,NULL,NULL));
 //--------------------------------------------------------------------------------------------------
 void ReportResourceUsage(OptionsType Options,CGroupFileNamesType CGroupFileNames,double WCLost) {
 
-    double CPUUsed, WCUsed, RAMUsed, CPUUsedByUser, CPUUsedBySystem;
+    double CPUUsed, WCUsed, MEMUsed, CPUUsedByUser, CPUUsedBySystem;
     FILE* VarFile;
 
     CPUUsed = CPUUsage(Options,CGroupFileNames.CPUStatFile,&CPUUsedByUser,&CPUUsedBySystem);
 //----WC might be 1s too high due to sleep in loop to allow processes to die
     WCUsed = WCUsage(Options) - WCLost;
-    RAMUsed = RAMUsage(Options,CGroupFileNames.RAMStatFile,TRUE);
+    MEMUsed = MEMUsage(Options,CGroupFileNames.MEMStatFile,TRUE);
 
     MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,"Final CPU usage: %6.2fs\n",CPUUsed);
     MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,"Final WC  usage: %6.2fs\n",WCUsed);
-    MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,"Final RAM usage: %6.2fMiB\n",RAMUsed);
+    MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,"Final MEM usage: %6.2fMiB\n",MEMUsed);
 
     if (strlen(Options.VarFileName) > 0) {
         if ((VarFile = fopen(Options.VarFileName,"w")) == NULL) {
@@ -1206,7 +1208,7 @@ void ReportResourceUsage(OptionsType Options,CGroupFileNamesType CGroupFileNames
         fprintf(VarFile,"# CPUUSAGE: CPUTIME/WCTIME in percent\n");
         fprintf(VarFile,"CPUUSAGE=%.1f\n",100.0*CPUUsed/(WCUsed != 0 ? WCUsed : 1));
         fprintf(VarFile,"# MAXVM: maximum virtual memory used in MiB\n");
-        fprintf(VarFile,"MAXVM=%.2f\n",RAMUsed);
+        fprintf(VarFile,"MAXVM=%.2f\n",MEMUsed);
 
         fclose(VarFile);
     }
@@ -1217,7 +1219,7 @@ void MonitorDescendantProcesses(OptionsType Options,CGroupFileNamesType CGroupFi
     int NumberOfProccessesInCGroup;
     BOOLEAN DoneSomeKilling;
     int PIDsInCGroup[MAX_PIDS];
-    double CPUUsed, WCUsed, RAMUsed;
+    double CPUUsed, WCUsed, MEMUsed;
     double LastWCUsed;
     struct timespec SleepRequired;
     double WCLost;
@@ -1236,7 +1238,7 @@ NumberOfProccessesInCGroup);
 //----Always get resource usages for reporting, even if not limiting
         CPUUsed = CPUUsage(Options,CGroupFileNames.CPUStatFile,NULL,NULL);
         WCUsed = WCUsage(Options);
-        RAMUsed = RAMUsage(Options,CGroupFileNames.RAMStatFile,FALSE);
+        MEMUsed = MEMUsage(Options,CGroupFileNames.MEMStatFile,FALSE);
         if (Options.CPULimit > 0 && CPUUsed > Options.CPULimit) {
             MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,
 "CPU limit reached, killing processes\n");
@@ -1249,9 +1251,9 @@ NumberOfProccessesInCGroup);
             KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGALRM,WCUsed);
             DoneSomeKilling = TRUE;
         }
-        if (Options.RAMLimit > 0 && RAMUsed > Options.RAMLimit) {
+        if (Options.MEMLimit > 0 && MEMUsed > Options.MEMLimit) {
             MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,
-"RAM limit reached, killing processes\n");
+"MEM limit reached, killing processes\n");
             KillProcesses(Options,NumberOfProccessesInCGroup,PIDsInCGroup,SIGTERM,WCUsed);
             DoneSomeKilling = TRUE;
         }
@@ -1263,8 +1265,8 @@ NumberOfProccessesInCGroup);
         }
         if (WCUsed - LastWCUsed > Options.WCDelayBetweenResourceUsageReports) {
             LastWCUsed = WCUsed;
-            MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,"CPU: %.2fs WC: %.2fs RAM: %.2fMiB\n",
-CPUUsed,WCUsed,RAMUsed);
+            MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,"CPU: %.2fs WC: %.2fs MEM: %.2fMiB\n",
+CPUUsed,WCUsed,MEMUsed);
         }
         nanosleep(&SleepRequired,NULL);
         WCLost = SleepRequired.tv_sec + SleepRequired.tv_nsec/1000000000.0;
@@ -1344,8 +1346,8 @@ int main(int argc, char * argv[]) {
     CGroupFileNames = MakeCGroupFileNames(Options,CGroupFileNames,ParentPID);
     MakeCGroupDirectory(Options,CGroupFileNames);
     MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,
-"CPU limit %d, WC limit %d, RAM limit %d, Program %s\n",Options.CPULimit,Options.WCLimit,
-Options.RAMLimit,Options.ProgramToControl);
+"CPU limit %d, WC limit %d, MEM limit %d, Program %s\n",Options.CPULimit,Options.WCLimit,
+Options.MEMLimit,Options.ProgramToControl);
 
     if ((ChildPID = fork()) == -1) {
         MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not fork() for child processing");

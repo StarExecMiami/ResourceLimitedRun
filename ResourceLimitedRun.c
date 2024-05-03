@@ -78,7 +78,7 @@ typedef struct {
 
 typedef struct {
     String CGroupUserDir;
-    String CGroupDir;
+    String CGroupProcessDir;
     String CGroupProcsFile;
     String CPUSetFile;
     String CPUStatFile;
@@ -763,7 +763,7 @@ CGroupFileNamesType InitializeCGroupFileNames() {
 
     CGroupFileNamesType CGroupFileNames;
 
-    strcpy(CGroupFileNames.CGroupDir,"");
+    strcpy(CGroupFileNames.CGroupProcessDir,"");
     strcpy(CGroupFileNames.CGroupProcsFile,"");
     strcpy(CGroupFileNames.CPUStatFile,"");
     strcpy(CGroupFileNames.MEMStatFile,"");
@@ -776,55 +776,80 @@ CGroupFileNamesType MakeCGroupFileNames(OptionsType Options,CGroupFileNamesType 
 int ParentPID) {
 
     MySnprintf(CGroupFileNames.CGroupUserDir,MAX_STRING,"%s/%s",CGROUPS_DIR,Options.CGroupUser);
-    MySnprintf(CGroupFileNames.CGroupDir,MAX_STRING,"%s/%d",CGroupFileNames.CGroupUserDir,
+    MySnprintf(CGroupFileNames.CGroupProcessDir,MAX_STRING,"%s/%d",CGroupFileNames.CGroupUserDir,
 ParentPID);
-    MySnprintf(CGroupFileNames.CGroupProcsFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
+    MySnprintf(CGroupFileNames.CGroupProcsFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupProcessDir,
 "cgroup.procs");
-    MySnprintf(CGroupFileNames.CPUSetFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
+    MySnprintf(CGroupFileNames.CPUSetFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupProcessDir,
 "cpuset.cpus");
-    MySnprintf(CGroupFileNames.CPUStatFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
+    MySnprintf(CGroupFileNames.CPUStatFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupProcessDir,
 "cpu.stat");
-    MySnprintf(CGroupFileNames.MEMHighFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
+    MySnprintf(CGroupFileNames.MEMHighFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupProcessDir,
 "memory.high");
-    MySnprintf(CGroupFileNames.MEMStatFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
+    MySnprintf(CGroupFileNames.MEMStatFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupProcessDir,
 "memory.current");
 
     return(CGroupFileNames);
 }
 //--------------------------------------------------------------------------------------------------
-BOOLEAN DirectoryExists(char * DirectoryName) {
+BOOLEAN MyDirectoryExists(char * DirectoryName) {
 
     struct stat DirectoryStatus;
 
-    return(stat(DirectoryName,&DirectoryStatus) == 0 && S_ISDIR(DirectoryStatus.st_mode));
+    return(stat(DirectoryName,&DirectoryStatus) == 0 && S_ISDIR(DirectoryStatus.st_mode) &&
+DirectoryStatus.st_uid == getuid());
 
 }
 //--------------------------------------------------------------------------------------------------
-void MakeCGroupDirectory(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
+void SetUpCGroup(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
+
+    FILE* ShellFile;
+    String ShellCommand;
 
     MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,"Make cgroup directory %s\n",
-CGroupFileNames.CGroupDir);
+CGroupFileNames.CGroupProcessDir);
 //----If the user's cgroup directory has not been made, try - maybe I have the power (podman case)
-    if (!DirectoryExists(CGroupFileNames.CGroupUserDir)) {
-printf("Have to make the directory for %s\n",CGroupFileNames.CGroupUserDir);
+    if (!MyDirectoryExists(CGroupFileNames.CGroupUserDir)) {
         if (mkdir(CGroupFileNames.CGroupUserDir,0755) != 0) {
             MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not create %s\n",
 CGroupFileNames.CGroupUserDir);
         }
+        MySnprintf(ShellCommand,MAX_STRING,"chown -R %s:%s %s",Options.CGroupUser,
+Options.CGroupUser,CGroupFileNames.CGroupUserDir);
+        system(ShellCommand);
     }
-    if (!DirectoryExists(CGroupFileNames.CGroupDir) && mkdir(CGroupFileNames.CGroupDir,0755) != 0) {
-        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not create %s\n",CGroupFileNames.CGroupDir);
+system("ls -la /sys/fs/cgroup/root");
+
+//----Make sure all the necessary controllers are there
+    MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,
+"Add cgroup controllers %s to %s/cgroup.subtree_control\n","+memory +cpu +cpuset",
+CGroupFileNames.CGroupUserDir);
+    MySnprintf(ShellCommand,MAX_STRING,"cat >> %s/cgroup.subtree_control",
+CGroupFileNames.CGroupUserDir);
+    if ((ShellFile = popen(ShellCommand,"w")) == NULL) {
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,
+"Could not open %s/cgroup.subtree_control for writing\n",CGroupFileNames.CGroupUserDir);
+    }
+    fprintf(ShellFile,"+memory +cpu +cpuset\n");
+    pclose(ShellFile);
+
+system("echo aaaaaaa ; cat /sys/fs/cgroup/root/cgroup.subtree_control ; echo bbbbbbb");
+
+    if (!MyDirectoryExists(CGroupFileNames.CGroupProcessDir) && 
+mkdir(CGroupFileNames.CGroupProcessDir,0755) != 0) {
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not create %s\n",
+CGroupFileNames.CGroupProcessDir);
     }
 }
 //--------------------------------------------------------------------------------------------------
-void RemoveCGroupDirectory(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
+void RemoveCGroupProcessDirectory(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
 
-    if (strlen(CGroupFileNames.CGroupDir) > 0 && DirectoryExists(CGroupFileNames.CGroupDir)) {
+    if (strlen(CGroupFileNames.CGroupProcessDir) > 0 && MyDirectoryExists(CGroupFileNames.CGroupProcessDir)) {
         MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,"Remove cgroup directory %s\n",
-CGroupFileNames.CGroupDir);
-        if (rmdir(CGroupFileNames.CGroupDir) != 0) {
+CGroupFileNames.CGroupProcessDir);
+        if (rmdir(CGroupFileNames.CGroupProcessDir) != 0) {
             MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not remove %s\n",
-CGroupFileNames.CGroupDir);
+CGroupFileNames.CGroupProcessDir);
         }
     }
 }
@@ -1333,7 +1358,7 @@ Options.ProgramOutputFileName);
     if (CGroupFileNamesPtr == NULL) {
         printf("DANGER DANGER cannot CleanUp CGroup\n");
     } else {
-        RemoveCGroupDirectory(Options,*CGroupFileNamesPtr);
+        RemoveCGroupProcessDirectory(Options,*CGroupFileNamesPtr);
     }
 
     if (Options.RLROutputFile != NULL) {
@@ -1362,7 +1387,7 @@ int main(int argc, char * argv[]) {
     SetUpSignalHandling(Options);
     ParentPID = getpid();
     CGroupFileNames = MakeCGroupFileNames(Options,CGroupFileNames,ParentPID);
-    MakeCGroupDirectory(Options,CGroupFileNames);
+    SetUpCGroup(Options,CGroupFileNames);
     MyPrintf(Options,VERBOSITY_RESOURCE_USAGE,TRUE,
 "CPU limit %d, WC limit %d, MEM limit %d, Program %s\n",Options.CPULimit,Options.WCLimit,
 Options.MEMLimit,Options.ProgramToControl);

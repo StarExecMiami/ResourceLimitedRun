@@ -77,6 +77,7 @@ typedef struct {
 } OptionsType;
 
 typedef struct {
+    String CGroupUserDir;
     String CGroupDir;
     String CGroupProcsFile;
     String CPUSetFile;
@@ -185,7 +186,7 @@ started from running a supplied program with its arguments. \n\
 + Run \"ResourceLimitedRun -O\" to see the default options.\n\
   Set options before -O to see them listed.\n\
 + Run \"ResourceLimitedRun -A\" to see your CPU architecture.\n\
-+ Run with a command like ... \"ResourceLimitedRun -W 30 -C 60 -t -e 'MPFibonacci 46'\"\n\
++ Run with a command like ... \"ResourceLimitedRun -W 30 -C 60 -t -e MPFibonacci 46\"\n\
   to see the action.\n\
 ");
 
@@ -774,7 +775,8 @@ CGroupFileNamesType InitializeCGroupFileNames() {
 CGroupFileNamesType MakeCGroupFileNames(OptionsType Options,CGroupFileNamesType CGroupFileNames,
 int ParentPID) {
 
-    MySnprintf(CGroupFileNames.CGroupDir,MAX_STRING,"%s/%s/%d",CGROUPS_DIR,Options.CGroupUser,
+    MySnprintf(CGroupFileNames.CGroupUserDir,MAX_STRING,"%s/%s",CGROUPS_DIR,Options.CGroupUser);
+    MySnprintf(CGroupFileNames.CGroupDir,MAX_STRING,"%s/%d",CGroupFileNames.CGroupUserDir,
 ParentPID);
     MySnprintf(CGroupFileNames.CGroupProcsFile,MAX_STRING,"%s/%s",CGroupFileNames.CGroupDir,
 "cgroup.procs");
@@ -790,18 +792,34 @@ ParentPID);
     return(CGroupFileNames);
 }
 //--------------------------------------------------------------------------------------------------
+BOOLEAN DirectoryExists(char * DirectoryName) {
+
+    struct stat DirectoryStatus;
+
+    return(stat(DirectoryName,&DirectoryStatus) == 0 && S_ISDIR(DirectoryStatus.st_mode));
+
+}
+//--------------------------------------------------------------------------------------------------
 void MakeCGroupDirectory(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
 
     MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,"Make cgroup directory %s\n",
 CGroupFileNames.CGroupDir);
-    if (mkdir(CGroupFileNames.CGroupDir,0755) != 0) {
+//----If the user's cgroup directory has not been made, try - maybe I have the power (podman case)
+    if (!DirectoryExists(CGroupFileNames.CGroupUserDir)) {
+printf("Have to make the directory for %s\n",CGroupFileNames.CGroupUserDir);
+        if (mkdir(CGroupFileNames.CGroupUserDir,0755) != 0) {
+            MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not create %s\n",
+CGroupFileNames.CGroupUserDir);
+        }
+    }
+    if (!DirectoryExists(CGroupFileNames.CGroupDir) && mkdir(CGroupFileNames.CGroupDir,0755) != 0) {
         MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not create %s\n",CGroupFileNames.CGroupDir);
     }
 }
 //--------------------------------------------------------------------------------------------------
 void RemoveCGroupDirectory(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
 
-    if (strlen(CGroupFileNames.CGroupDir) > 0 && access(CGroupFileNames.CGroupDir,F_OK)) {
+    if (strlen(CGroupFileNames.CGroupDir) > 0 && DirectoryExists(CGroupFileNames.CGroupDir)) {
         MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,"Remove cgroup directory %s\n",
 CGroupFileNames.CGroupDir);
         if (rmdir(CGroupFileNames.CGroupDir) != 0) {

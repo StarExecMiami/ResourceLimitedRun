@@ -808,6 +808,17 @@ void SetUpCGroup(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
 
     MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,"Make cgroup directory %s\n",
 CGroupFileNames.CGroupProcessDir);
+    if (!MyDirectoryExists(CGroupFileNames.CGroupProcessDir) && 
+mkdir(CGroupFileNames.CGroupProcessDir,0755) != 0) {
+        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not create %s\n",
+CGroupFileNames.CGroupProcessDir);
+    }
+    return;
+
+//----This code was in the hope I could do the InstallCGroups from within. I can't because even
+//----as root only the first part works where it makes real directories. The cgroup.subtree_control
+//----cannot be installed from inside, even if root. Can't understand why.
+
 //----If the user's cgroup directory has not been made, try - maybe I have the power (podman case)
     if (!MyDirectoryExists(CGroupFileNames.CGroupUserDir)) {
         if (mkdir(CGroupFileNames.CGroupUserDir,0755) != 0) {
@@ -833,13 +844,6 @@ CGroupFileNames.CGroupUserDir);
     fprintf(ShellFile,"+memory +cpu +cpuset\n");
     pclose(ShellFile);
 
-system("echo aaaaaaa ; cat /sys/fs/cgroup/root/cgroup.subtree_control ; echo bbbbbbb");
-
-    if (!MyDirectoryExists(CGroupFileNames.CGroupProcessDir) && 
-mkdir(CGroupFileNames.CGroupProcessDir,0755) != 0) {
-        MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Could not create %s\n",
-CGroupFileNames.CGroupProcessDir);
-    }
 }
 //--------------------------------------------------------------------------------------------------
 void RemoveCGroupProcessDirectory(OptionsType Options,CGroupFileNamesType CGroupFileNames) {

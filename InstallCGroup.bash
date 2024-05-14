@@ -18,19 +18,17 @@ cd /sys/fs/cgroup/ || exit 1
 #----get propagated upwards
 echo "chmod 666 cgroup.procs"
 chmod 666 cgroup.procs || exit 1
+#----Add the control groups so the lower group can too
+echo "echo '+memory +cpu +cpuset' >> cgroup.subtree_control"
+echo '+memory +cpu +cpuset' >> cgroup.subtree_control || exit 1
 
 #----Make the cgroup
 echo "mkdir $CGroupUserName"
 mkdir "$CGroupUserName" || exit 1
-echo "chown -R ${CGroupUserName}:${CGroupGroupName} $CGroupUserName"
-chown -R "${CGroupUserName}:${CGroupGroupName}" "$CGroupUserName" || exit 1
-
-echo "cd $CGroupUserName"
-cd "$CGroupUserName" || exit 1
 #----Add the control groups
-echo "echo '+memory +cpu +cpuset' >> cgroup.subtree_control"
-echo '+memory +cpu +cpuset' >> cgroup.subtree_control || exit 1
-#----Make user own the new stuff
-echo "chown ${CGroupUserName}:${CGroupGroupName} *"
-chown "${CGroupUserName}:${CGroupGroupName}" * || exit 1
+echo "echo '+memory +cpu +cpuset' >> $CGroupUserName/cgroup.subtree_control"
+echo '+memory +cpu +cpuset' >> $CGroupUserName/cgroup.subtree_control || exit 1
+#----Make user own it all
+echo "chown -R ${CGroupUserName}:${CGroupGroupName} $CGroupUserName"
+chown -R "${CGroupUserName}:${CGroupGroupName}" $CGroupUserName || exit 1
 

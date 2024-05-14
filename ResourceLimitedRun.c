@@ -498,7 +498,7 @@ char * argv[]) {
     };
 
     OptionStartIndex = 0;
-    while ((Option = getopt_long(argc,argv,"u:b:OAC:W:M:p:c:ym:r:d:teo:w:v:xh",LongOptions,
+    while ((Option = getopt_long(argc,argv,"+u:b:OAC:W:M:p:c:ym:r:d:teo:w:v:xh",LongOptions,
 &OptionStartIndex)) != -1) {
         switch(Option) {
 //---Flag options
@@ -848,7 +848,8 @@ CGroupFileNames.CGroupUserDir);
 //--------------------------------------------------------------------------------------------------
 void RemoveCGroupProcessDirectory(OptionsType Options,CGroupFileNamesType CGroupFileNames) {
 
-    if (strlen(CGroupFileNames.CGroupProcessDir) > 0 && MyDirectoryExists(CGroupFileNames.CGroupProcessDir)) {
+    if (strlen(CGroupFileNames.CGroupProcessDir) > 0 && 
+MyDirectoryExists(CGroupFileNames.CGroupProcessDir)) {
         MyPrintf(Options,VERBOSITY_BIG_STEPS,TRUE,"Remove cgroup directory %s\n",
 CGroupFileNames.CGroupProcessDir);
         if (rmdir(CGroupFileNames.CGroupProcessDir) != 0) {
@@ -1146,7 +1147,8 @@ PIDOfRLR);
 Options.ProgramToControl);
 //----Note all signal handling is reset
     execvp(Options.ProgramToControl,Options.ProgramToControlArgs);
-    MyPrintf(Options,VERBOSITY_ERROR,TRUE,"Child %d could not execvp %s\n",ChildPID,
+//----Don't print with error - don't need CleanUp here
+    MyPrintf(Options,VERBOSITY_NONE,TRUE,"ERROR: Child %d could not execvp %s\n",ChildPID,
 Options.ProgramToControl);
 }
 //--------------------------------------------------------------------------------------------------
